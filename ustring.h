@@ -59,6 +59,8 @@ using namespace std;
     namespace detail {
     template <typename... Args>
             constexpr bool dependent_false = false;
+    template <auto... Args>
+            constexpr bool dependent_false_v = false;
     }
 
 
@@ -191,7 +193,7 @@ private:
     using impl_ptr = extra_ptr<mode, impl>;
 
     template<encoding_t E> struct encoding_type_detail {
-        static_assert(detail::dependent_false<E>, "Bad enum value to ecoding_type");         // Error to use base case
+        static_assert(detail::dependent_false_v<E>, "Bad enum value to ecoding_type");         // Error to use base case
         using type = void;   // Silence Clang.
     };
 
