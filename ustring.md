@@ -404,9 +404,13 @@ Some functionality is implemented as member functions for compatibility with bas
 bool empty() const;
 
 pair<iterator, iterator> find_ends(const ustring& pattern) const;
+pair<iterator, iterator> find_ends(const ustring& pattern, const iterator& after) const;
 iterator find(const ustring& pattern) const;
+iterator find(const ustring& pattern, const iterator& after) const;
 pair<iterator, iterator> rfind_ends(const ustring& pattern) const;
+pair<iterator, iterator> find_ends(const ustring& pattern, const iterator& before) const;
 iterator rfind(const ustring& pattern) const;
+iterator rfind(const ustring& pattern, const iterator& before) const;
 
 bool contains(const ustring& pattern) const;
 bool starts_with(const ustring& pattern) const;

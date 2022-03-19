@@ -86,7 +86,7 @@ public:
 
     class iterator;
     using const_iterator = iterator;
-    using reverse_iterator = std::reverse_iterator<iterator>;
+    using reverse_iterator = reverse_iterator<iterator>;
     using const_reverse_iterator = reverse_iterator;
 
     // Each ustring is conceptually encoded using one of the encodings corresponding to a char type. The narrow encoding
@@ -230,14 +230,18 @@ public:
 
         // Similar to operator+ but clamps to begin and end if by would leave us out of range. This can be used to implement
         // size and similar operations. Return false if either end was hit.
-        bool advance(ptrdiff_t by);
+        void advance(ptrdiff_t by);
+        size_t advance(const iterator& towards, size_t by);
+        size_t advance(const iterator& to);
 
         // Iterators know their position in the string, counted from begin or end. Negative indices indicate counting from
         // the end, with -1 after the last character (unfortunately).
         ptrdiff_t index() const { return m_index; }
 
-        //////// Internal use ////////
-
+    private:
+        friend class ustring;
+        friend class ustring_saver;
+        
         const ustring& str() const { return *m_string; }
 
         // Used by ustring's iterator based ctor.
@@ -248,7 +252,6 @@ public:
         void set_pos(const byte* pos) { m_pos = pos; }
         void set_part(uint8_t part) { m_part = part; }
 
-    private:
         // This helper function returns the remaining steps to take in case the part ends.
         ptrdiff_t advance_in_part(ptrdiff_t by, const byte* beg);
         void decode_utf8();
@@ -286,8 +289,8 @@ public:
 
     // These ctors copy the contents. Parallel ctors for rvalue references could be added, which as QoI could hold an appropriate
     // basic_string as a union member to save allocations/copying.
-    template<character T, typename Tr = char_traits<T>, typename Al = std::allocator<T>> ustring(const basic_string<T, Tr, Al>& src) : ustring(src.data(), src.size()) {}
-    template<character T, typename Tr = char_traits<T>, typename Al = std::allocator<T>> ustring(basic_string<T, Tr, Al>&& src) : ustring(src.data(), src.size()) {}           // Optimization not implemented yet.
+    template<character T, typename Tr = char_traits<T>, typename Al = allocator<T>> ustring(const basic_string<T, Tr, Al>& src) : ustring(src.data(), src.size()) {}
+    template<character T, typename Tr = char_traits<T>, typename Al = allocator<T>> ustring(basic_string<T, Tr, Al>&& src) : ustring(src.data(), src.size()) {}           // Optimization not implemented yet.
     template<character T, typename Tr = char_traits<T>> ustring(basic_string_view<T, Tr> src) : ustring(src.data(), src.size()) {}
 
     // Constructors which _copy_ the literals, as these can not be assumed to not be pointers to buffers of changing data.
@@ -320,10 +323,10 @@ public:
 
     // Pseudo constructors from string literals used by suffix u literals. Implementations may disable reference counting and
     // no heap storage needs to be allocated.
-    template<character T> static ustring view(const T*, std::size_t);
+    template<character T> static ustring view(const T*, size_t);
 
     // Views of lvalue basic_strings should also be provided. Maybe with pos/size to avoid having to mess around with view(str.data() + pos, cnt)
-    template<character T, typename Tr = char_traits<T>, typename Al = std::allocator<T>>
+    template<character T, typename Tr = char_traits<T>, typename Al = allocator<T>>
     static ustring view(const basic_string<T, Tr, Al>& original, size_t pos = 0, size_t count = npos) { return view(original.data() + pos, count); }
     template<character T, typename Tr = char_traits<T>>
     static ustring view(const basic_string_view<T, Tr>& original, size_t pos = 0, size_t count = npos) { return view(original.data() + pos, count); }
@@ -336,10 +339,15 @@ public:
 
     // Finding. Note: No complicated versions with pos arguments needed as it is cheap to make a substring from iterators.
     // TODO: Verify by testing usability.
-    pair<iterator, iterator> find_ends(const ustring& pattern) const;
+    pair<iterator, iterator> find_ends(const ustring& pattern, const iterator& after) const;
+    pair<iterator, iterator> find_ends(const ustring& pattern) const { return find_ends(pattern, begin()); }
+    iterator find(const ustring& pattern, const iterator& after) const { return find_ends(pattern, after).first; }
     iterator find(const ustring& pattern) const { return find_ends(pattern).first; }
-    pair<iterator, iterator> rfind_ends(const ustring& pattern) const;
-    iterator rfind(const ustring& pattern) const { return rfind_ends(pattern).first; }		// Returns an iterator pointing at the start of the last match, relative to end()
+
+    pair<iterator, iterator> rfind_ends(const ustring& pattern, const iterator& before) const;
+    pair<iterator, iterator> rfind_ends(const ustring& pattern) const { return rfind_ends(pattern, end()); }
+    iterator rfind(const ustring& pattern, const iterator& before) const { return rfind_ends(pattern, before).first; }
+    iterator rfind(const ustring& pattern) const { return rfind_ends(pattern).first; }
 
     // These should probably be overloaded with basic_string<T> versions to avoid having to
     // create an ustring from a (lvalue) basic_string first.
@@ -353,12 +361,12 @@ public:
     ustring last(const iterator & from) const { return substr(from, end()); }
 
     // Convert to basic_string by copying the data. This always works regardless of the internal encoding.
-    template<character T> std::basic_string<T> basic_string(T bad_char = '?') const;
-    std::string string(char bad_char = '?') const { return basic_string<char>(bad_char); }
-    std::wstring wstring() const { return basic_string<wchar_t>(); }
-    std::u8string u8string() const { return basic_string<char8_t>(); }
-    std::u16string u16string() const { return basic_string<char16_t>(); }
-    std::u32string u32string() const { return basic_string<char32_t>(); }
+    template<character T> basic_string<T> basic_string(T bad_char = '?') const;
+    string string(char bad_char = '?') const { return basic_string<char>(bad_char); }
+    wstring wstring() const { return basic_string<wchar_t>(); }
+    u8string u8string() const { return basic_string<char8_t>(); }
+    u16string u16string() const { return basic_string<char16_t>(); }
+    u32string u32string() const { return basic_string<char32_t>(); }
 
 	// Accessing the data in its stored encoding.
     encoding_t encoding() const;                 // Return encoding, but for a multi implementation with different encodings or a non-standard internal representation return encoding_t::other.
@@ -416,7 +424,7 @@ private:
     void expand_multi(int count);       // count is the total required count.
     void unref();
 
-    template<character T> size_t copy_internal(T* dest, size_t count, iterator& start, T bad_char = '?') const;
+    template<character T> size_t copy_part(T* dest, size_t count, iterator& start, T bad_char = '?') const;
 
 	union {
 		struct {    // Long strings with shared data. m_start/m_end are needed for substrings. Also used for multi storage.
@@ -502,7 +510,7 @@ public:
      // and ok sz is changed to reflect how much of the buffer has been filled. For partial this could be a few bytes less than the
      // entire buffer if the result of converting one more code point would not fit the buffer. For ok return sz is set to indicate
      // where the converted data ends.
-     std::codecvt_base::result fill(byte* buffer, size_t& sz);
+     codecvt_base::result fill(byte* buffer, size_t& sz);
 
 private:
     ustring m_source;
@@ -559,7 +567,7 @@ ustring toupper(const ustring& src, const locale& loc = locale());
 ustring capitalize(const ustring& src, const locale& loc = locale());
 
 
-ustring insert(const ustring& source, ustring::iterator start, const ustring& replacement);
+ustring insert(const ustring& source, ustring::iterator start, const ustring& addition);
 ustring replace(const ustring& source, ustring::iterator start, ustring::iterator end, const ustring& replacement);
 ustring replace(const ustring& source, pair<ustring::iterator, ustring::iterator> where, const ustring& replacement);
 ustring replace(const ustring& source, const ustring& pattern, const ustring& replacement, size_t max_count = numeric_limits<size_t>::max());
@@ -656,20 +664,19 @@ inline ustring::ustring(ustring&& src)
     src.m_soo.m_count = 0;      // Make src look empty.
 }
 
-// Ctor from one char
-
+// Ctor from one repeated char
 ustring::ustring(size_t count, char32_t c)
 {
     char32_t* ptr = reinterpret_cast<char32_t*>(setup(count * sizeof(char32_t), mode::utf32));
-    std::fill(ptr, ptr + count, c);
+    fill(ptr, ptr + count, c);
 }
 
-
-template<character T> ustring::ustring(const T* src, std::size_t sz)
+template<character T> ustring::ustring(const T* src, size_t sz)
 {
     init(src, sz * sizeof(T), mode::encoding_t(encoding_of<T>()));
 }
-template<> inline ustring::ustring(const char* src, std::size_t sz)
+
+template<> inline ustring::ustring(const char* src, size_t sz)
 {
     auto table = table8_for_current_locale();
     if (table != nullptr) {     // Soo check must make room for table
@@ -678,7 +685,8 @@ template<> inline ustring::ustring(const char* src, std::size_t sz)
     else
         init(src, sz, mode::direct8);
 }
-template<> inline ustring::ustring(const wchar_t* src, std::size_t sz)
+
+template<> inline ustring::ustring(const wchar_t* src, size_t sz)
 {
     if constexpr (sizeof(wchar_t) == 2) {
         auto table = table16_for_current_locale();
@@ -701,50 +709,6 @@ template<> inline ustring::ustring(const wchar_t* src) : ustring(src, wcslen(src
 template<> inline ustring::ustring(const char8_t* src) : ustring(src, strlen(reinterpret_cast<const char*>(src))) {}
 template<> inline ustring::ustring(const char16_t* src) : ustring(src, len_helper(src)) {}
 template<> inline ustring::ustring(const char32_t* src) : ustring(src, len_helper(src)) {}
-
-
-inline ustring ustring::substr(const ustring::iterator& from, const ustring::iterator& to) const
-{
-    ustring ret;
-    switch(get_mode().storage()) {
-    case mode::soo:
-        // For a soo string we must copy the selected characters.
-        if (get_mode().has_table()) {
-            ret.m_soo_table.m_count = uint8_t(to.pos() - from.pos());
-            memcpy(ret.m_soo_table.m_data, from.pos(), m_soo_table.m_count);
-            ret.m_soo_table.m_mode = m_soo_table.m_mode;
-        }
-        else {
-            ret.m_soo.m_count = uint8_t(to.pos() - from.pos());
-            memcpy(ret.m_soo.m_data, from.pos(), m_soo.m_count);
-            ret.m_soo.m_mode = get_mode();
-        }
-        break;
-        
-    case mode::shared:
-        ret.m_shared.m_begin = from.pos();
-        ret.m_shared.m_end = to.pos();
-        ret.m_shared.m_impl = m_shared.m_impl;  // Note: This includes the mode byte.
-        ret.get_impl().m_refs++;
-        break;
-
-    case mode::multi:
-        ret.m_multi.m_begin = from.combined_pos();
-        ret.m_multi.m_end = to.combined_pos();
-        ret.m_multi.m_impl = m_multi.m_impl;  // Note: This includes the mode byte.
-        ret.get_impl().m_refs++;
-        break;
-
-    case mode::literal:
-        ret.m_literal.m_begin = from.pos();
-        ret.m_literal.m_end = to.pos();
-        ret.m_literal.m_table = m_literal.m_table;  // Note: This includes the mode byte.
-        break;
-    }
-
-    return ret;
-}
-
 inline ustring& ustring::operator=(const ustring& rhs)
 {
     if (this == &rhs)
@@ -896,9 +860,9 @@ template<character T> ustring ustring::view(const T* src, size_t sz)
     return ret;
 }
 
-inline pair<ustring::iterator, ustring::iterator> ustring::find_ends(const ustring& pattern) const
+inline pair<ustring::iterator, ustring::iterator> ustring::find_ends(const ustring& pattern, const iterator& after) const
 {
-    iterator ret = begin();
+    iterator ret = after;
 
     iterator pb = pattern.begin();
     iterator pe = pattern.end();
@@ -927,9 +891,9 @@ inline pair<ustring::iterator, ustring::iterator> ustring::find_ends(const ustri
     // Compilers should know that a while (true) without break won't get here.
 }
 
-inline pair<ustring::iterator, ustring::iterator> ustring::rfind_ends(const ustring& pattern) const
+inline pair<ustring::iterator, ustring::iterator> ustring::rfind_ends(const ustring& pattern, const iterator& before) const
 {
-    iterator ret = end();
+    iterator ret = before;
 
     iterator pb = pattern.begin();
     iterator pe = pattern.end();
@@ -1000,6 +964,48 @@ inline bool ustring::ends_with(const ustring& pattern) const
     }
 }
 
+inline ustring ustring::substr(const ustring::iterator& from, const ustring::iterator& to) const
+{
+    ustring ret;
+    switch(get_mode().storage()) {
+        case mode::soo:
+            // For a soo string we must copy the selected characters.
+            if (get_mode().has_table()) {
+                ret.m_soo_table.m_count = uint8_t(to.pos() - from.pos());
+                memcpy(ret.m_soo_table.m_data, from.pos(), m_soo_table.m_count);
+                ret.m_soo_table.m_mode = m_soo_table.m_mode;
+            }
+            else {
+                ret.m_soo.m_count = uint8_t(to.pos() - from.pos());
+                memcpy(ret.m_soo.m_data, from.pos(), m_soo.m_count);
+                ret.m_soo.m_mode = get_mode();
+            }
+            break;
+
+        case mode::shared:
+            ret.m_shared.m_begin = from.pos();
+            ret.m_shared.m_end = to.pos();
+            ret.m_shared.m_impl = m_shared.m_impl;  // Note: This includes the mode byte.
+            ret.get_impl().m_refs++;
+            break;
+
+        case mode::multi:
+            ret.m_multi.m_begin = from.combined_pos();
+            ret.m_multi.m_end = to.combined_pos();
+            ret.m_multi.m_impl = m_multi.m_impl;  // Note: This includes the mode byte.
+            ret.get_impl().m_refs++;
+            break;
+
+        case mode::literal:
+            ret.m_literal.m_begin = from.pos();
+            ret.m_literal.m_end = to.pos();
+            ret.m_literal.m_table = m_literal.m_table;  // Note: This includes the mode byte.
+            break;
+    }
+
+    return ret;
+}
+
 template<character T> basic_string<T> ustring::basic_string(T bad_char) const
 {
     size_t count = estimated_size<T>();
@@ -1016,7 +1022,6 @@ template<character T> basic_string<T> ustring::basic_string(T bad_char) const
     }
 }
 
-
 inline ustring::encoding_t ustring::encoding() const
 {
     if (get_mode().storage() != mode::multi)
@@ -1024,7 +1029,6 @@ inline ustring::encoding_t ustring::encoding() const
 
     return other;
 }
-
 
 static ustring::encoding_t normalize(ustring::encoding_t src)
 {
@@ -1046,12 +1050,10 @@ ustring::mode::encoding_t ustring::mode::normalized_encoding() const
         return ustring::mode::utf32;
 }
 
-
 static bool equivalent(ustring::encoding_t lhs, ustring::encoding_t rhs)
 {
     return normalize(lhs) == normalize(rhs);
 }
-
 
 // This checks that T is consistent with the current encoding and returns nullptr if not, or if storage is not contiguous.
 template<character T> const T* ustring::data() const
@@ -1071,20 +1073,12 @@ inline const byte* ustring::data() const
     return get_begin().ptr();
 }
 
-
 inline size_t ustring::bytes() const
 {
     if (get_mode().storage() != ustring::mode::multi)
         return get_end().ptr() - get_begin().ptr();
 
-    size_t ret = 0;
-    uint8_t parts = get_impl().m_multi.m_count;
-    for (uint8_t p = 0; p < parts; p++) {
-        auto& part = get_part(p);
-        ret += part.get_end().ptr() - part.get_begin().ptr();
-    }
-
-    return ret;
+    return npos;
 }
 
 // Return estimated size needed for copy.
@@ -1096,7 +1090,6 @@ template<character T> size_t ustring::estimated_size() const
 }
 
 // These internal methods must be defined before copy.
-
 static inline bool encode_utf8(char8_t*& d, char8_t* e, char32_t c)
 {
     if (c < 128) {
@@ -1155,11 +1148,11 @@ static inline bool encode_utf16(char16_t*& d, char16_t* e, char32_t c)
     return true;
 }
 
-template<> inline size_t ustring::copy_internal(char* dest, size_t count, iterator& start, char bad_char) const
+template<> inline size_t ustring::copy_part(char* dest, size_t count, iterator& start, char bad_char) const
 {
     if (encoding() == narrow) {
         const byte* pos = start.pos();
-        size_t bytes = std::min(count, size_t(get_end().ptr() - pos));
+        size_t bytes = min(count, size_t(get_end().ptr() - pos));
         memcpy(dest, pos, bytes);
         start.set_pos(pos + bytes);
         return bytes;
@@ -1210,11 +1203,11 @@ template<> inline size_t ustring::copy_internal(char* dest, size_t count, iterat
     return d - dest;
 }
 
-template<> inline size_t ustring::copy_internal(char8_t* dest, size_t count, iterator& start, char8_t bad_char) const
+template<> inline size_t ustring::copy_part(char8_t* dest, size_t count, iterator& start, char8_t bad_char) const
 {
     if (encoding() == utf8) {
         const byte* pos = start.pos();
-        size_t bytes = std::min(count, size_t(get_end().ptr() - pos));
+        size_t bytes = min(count, size_t(get_end().ptr() - pos));
         memcpy(dest, pos, bytes);
         start.set_pos(pos + bytes);
         return bytes;
@@ -1234,11 +1227,11 @@ template<> inline size_t ustring::copy_internal(char8_t* dest, size_t count, ite
     return d - dest;
 }
 
-template<> inline size_t ustring::copy_internal(char16_t* dest, size_t count, iterator& start, char16_t bad_char) const
+template<> inline size_t ustring::copy_part(char16_t* dest, size_t count, iterator& start, char16_t bad_char) const
 {
     if (encoding() == utf16) {
         const byte* pos = start.pos();
-        size_t bytes = std::min(count * 2, size_t(get_end().ptr() - pos));
+        size_t bytes = min(count * 2, size_t(get_end().ptr() - pos));
         memcpy(dest, pos, bytes);
         start.set_pos(pos + bytes);
         return bytes / 2;
@@ -1258,11 +1251,11 @@ template<> inline size_t ustring::copy_internal(char16_t* dest, size_t count, it
     return d - dest;
 }
 
-template<> inline size_t ustring::copy_internal(char32_t* dest, size_t count, iterator& start, char32_t bad_char) const
+template<> inline size_t ustring::copy_part(char32_t* dest, size_t count, iterator& start, char32_t bad_char) const
 {
     if (encoding() == utf32) {
         const byte* pos = start.pos();
-        size_t bytes = std::min(count * 4, size_t(get_end().ptr() - pos));
+        size_t bytes = min(count * 4, size_t(get_end().ptr() - pos));
         memcpy(dest, pos, bytes);
         start.set_pos(pos + bytes);
         return bytes / 4;
@@ -1281,12 +1274,12 @@ template<> inline size_t ustring::copy_internal(char32_t* dest, size_t count, it
     return d - dest;
 }
 
-template<> inline size_t ustring::copy_internal(wchar_t* dest, size_t count, iterator& start, wchar_t bad_char) const
+template<> inline size_t ustring::copy_part(wchar_t* dest, size_t count, iterator& start, wchar_t bad_char) const
 {
     if constexpr (sizeof(wchar_t) == 2)
-        return copy_internal(reinterpret_cast<char16_t*>(dest), count, start, char16_t(bad_char));
+        return copy_part(reinterpret_cast<char16_t*>(dest), count, start, char16_t(bad_char));
     else
-        return copy_internal(reinterpret_cast<char32_t*>(dest), count, start, char32_t(bad_char));
+        return copy_part(reinterpret_cast<char32_t*>(dest), count, start, char32_t(bad_char));
 }
 
 // Regardless of the encoding of the ustring it is always possible to retrieve its contents in one of the encodings
@@ -1305,7 +1298,7 @@ template<character T> size_t ustring::copy(T* dest, size_t count, iterator& star
         auto subStart = get_part(part).begin();
         subStart.set_pos(start.pos());
         while (part < parts) {
-            size_t bytes = get_part(part).copy_internal(dest, count, subStart, bad_char);
+            size_t bytes = get_part(part).copy_part(dest, count, subStart, bad_char);
             if (subStart.pos() < get_part(part).get_end().ptr()) {     // run out of dest inside the part
                 start.set_pos(subStart.pos());
                 start.set_part(part);
@@ -1325,7 +1318,7 @@ template<character T> size_t ustring::copy(T* dest, size_t count, iterator& star
         return ret;
     }
     else
-        return copy_internal(dest, count, start, bad_char);
+        return copy_part(dest, count, start, bad_char);
 }
 
 
@@ -1457,14 +1450,12 @@ inline ustring::iterator ustring::iterator::operator+(ptrdiff_t by) const
 
 inline ustring::iterator& ustring::iterator::operator+=(ptrdiff_t by)
 {
-    bool ok = advance(by);
-    assert(ok);         // Not allowed to go out of range using operator += as it can't return this state.
+    advance(by);
     return *this;
 }
 
-// Similar to operator+ but clamps to begin and end if by would leave us out of range. This can be used to implement
-// size and similar operations. Return false if either end was hit.
-inline bool ustring::iterator::advance(ptrdiff_t by)
+
+inline void ustring::iterator::advance(ptrdiff_t by)
 {
     if (m_multi) {
         // advance also between different parts, which may have different encodings.
@@ -1472,10 +1463,10 @@ inline bool ustring::iterator::advance(ptrdiff_t by)
             while (true) {
                 by = advance_in_part(by, nullptr);
                 if (by == 0)
-                    return true;
+                    return;
 
                 if (m_part == m_string->get_end().extra())
-                    return false;
+                    throw runtime_error("advance out of bounds");
 
                 m_part++;
                 m_pos = m_string->get_part(m_part).get_begin().ptr();
@@ -1486,7 +1477,54 @@ inline bool ustring::iterator::advance(ptrdiff_t by)
             while (true) {
                 by  = advance_in_part(by, m_string->get_part(m_part).get_begin().ptr());
                 if (by == 0)
-                    return true;
+                    return;
+
+                if (m_part == 0)
+                    throw runtime_error("advance out of bounds");
+
+                m_part--;
+                m_pos = m_string->get_part(m_part).get_end().ptr();
+                init_part();
+            }
+        }
+    }
+    else
+        advance_in_part(by, m_string->get_begin().ptr());
+
+
+    assert(false);
+}
+
+inline size_t ustring::iterator::advance(const iterator& towards, size_t by)
+{
+    if (by == 0)
+        return 0;
+    
+    if (towards < *this) {
+        if (m_multi) {
+            // advance also between different parts, which may have different encodings.
+            while (true) {
+                by = advance_in_part(by, nullptr);
+                if (by == 0)
+                    return by;
+
+                if (m_part == m_string->get_end().extra())
+                    return by - by;
+
+                m_part++;
+                m_pos = m_string->get_part(m_part).get_begin().ptr();
+                init_part();
+            }
+        }
+        else
+            return advance_in_part(by, m_string->get_begin().ptr()) != 0;
+    }
+    else {
+        if (m_multi) {
+            while (true) {
+                by  = advance_in_part(by, m_string->get_part(m_part).get_begin().ptr());
+                if (by == 0)
+                    return by;
 
                 if (m_part == 0)
                     return false;
@@ -1496,13 +1534,17 @@ inline bool ustring::iterator::advance(ptrdiff_t by)
                 init_part();
             }
         }
+        else
+            return advance_in_part(by, m_string->get_begin().ptr()) != 0;
     }
-    else
-        return advance_in_part(by, m_string->get_begin().ptr()) != 0;
-
 
     assert(false);
     return false;   // MSVC could not detect that code above cover all cases.
+}
+
+inline size_t ustring::iterator::advance(const iterator& towards)
+{
+    return advance(towards, numeric_limits<size_t>::max());
 }
 
 
@@ -1783,7 +1825,7 @@ inline void ustring::iterator::load()
         break;
     }
     case mode::direct24:
-        std::memcpy(&m_current, m_pos, 3);      // Little endian assumed.
+        memcpy(&m_current, m_pos, 3);      // Little endian assumed.
         break;
 
     case mode::table8:
@@ -2272,7 +2314,7 @@ inline ustring ustring_loader::str() &&
     else
         set_end(m_str);
 
-    return std::move(m_str);
+    return move(m_str);
 }
 
 
@@ -2293,7 +2335,7 @@ inline size_t ustring_saver::estimated_size(safety_margin margin) const
     return ret * sizes[int(margin)] / 10;
 }
 
-inline std::codecvt_base::result ustring_saver::fill(byte* buffer, size_t& sz)
+inline codecvt_base::result ustring_saver::fill(byte* buffer, size_t& sz)
 {
     assert(sz >= 4);            // Buffer must be at least four bytes or we can get stuck not being able to convert even a single code point.
     
@@ -2446,8 +2488,9 @@ inline ustring trim(const ustring& src)	// Trim both ends.
     return src.substr(i, e);
 }
 
-ustring tolower(const ustring& src, const locale& loc) {
-    auto& ct = use_facet<std::ctype<char32_t>>(loc);
+ustring tolower(const ustring& src, const locale& loc)
+{
+    auto& ct = use_facet<ctype<char32_t>>(loc);
     // An ustring loader and a stack based buffer is one way of avoiding creating too many parts in the result.
     // More optimal seems to be to allocate one part with the estimated size and then fill it up.
 
@@ -2460,13 +2503,45 @@ ustring toupper(const ustring& src, const locale& loc);
 ustring capitalize(const ustring& src, const locale& loc);
 
 
-ustring insert(const ustring& source, ustring::iterator start, const ustring& replacement);
-ustring replace(const ustring& source, ustring::iterator start, ustring::iterator end, const ustring& replacement);
-ustring replace(const ustring& source, pair<ustring::iterator, ustring::iterator> where, const ustring& replacement);
-ustring replace(const ustring& source, const ustring& pattern, const ustring& replacement, size_t max_count);
+ustring insert(const ustring& source, ustring::iterator start, const ustring& addition)
+{
+    return replace(source, start, start, addition);
+}
 
-ustring erase(const ustring& source, ustring::iterator start, ustring::iterator end);
-ustring erase(const ustring& source, const pair<ustring::iterator, ustring::iterator>& ends);
+ustring replace(const ustring& source, ustring::iterator start, ustring::iterator end, const ustring& replacement)
+{
+    return source.first(start) + replacement + source.last(end);
+}
+
+ustring replace(const ustring& source, pair<ustring::iterator, ustring::iterator> where, const ustring& replacement)
+{
+    return replace(source, where.first, where.second, replacement);
+}
+
+ustring replace(const ustring& source, const ustring& pattern, const ustring& replacement, size_t max_count)
+{
+    ustring ret;
+    auto prev = source.begin();
+    auto ends = source.find_ends(pattern);
+    while (ends.first != source.end() && max_count > 0) {
+        ret += source.substr(prev, ends.first) + replacement;
+        prev = ends.second;
+        ends = source.find_ends(pattern, ends.second);      // Continue searching from after the previous find
+        max_count--;
+    }
+
+    return ret + source.last(prev);
+}
+
+ustring erase(const ustring& source, ustring::iterator start, ustring::iterator end)
+{
+    return source.first(start) + source.last(end);
+}
+
+ustring erase(const ustring& source, const pair<ustring::iterator, ustring::iterator>& ends)
+{
+    return erase(source, ends.first, ends.second);
+}
 
 
 // Helpers for unicode code points. These are probably trivial if wchar_t is 32 bits as it just defers to iswspace but less so for
