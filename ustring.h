@@ -269,7 +269,7 @@ public:
     };
 
     template<character T> static constexpr encoding_t encoding_of();
-    template<encoding_t E> using encoding_type = encoding_type_detail<E>::type;
+    template<encoding_t E> using encoding_type = typename encoding_type_detail<E>::type;
 
     ustring();
 
