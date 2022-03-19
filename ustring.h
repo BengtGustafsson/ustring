@@ -1029,7 +1029,7 @@ static ustring::encoding_t normalize(ustring::encoding_t src)
 {
     if (src != ustring::wide)
         return src;
-    if (sizeof(wchar_t) == 2)
+    if constexpr (sizeof(wchar_t) == 2)
         return ustring::utf16;
     else
         return ustring::utf32;
@@ -1091,11 +1091,13 @@ static inline bool encode_utf8(char8_t*& d, char8_t* e, char32_t c)
     if (c < 128) {
         if (d == e)
             return false;
+
         *d++ = char8_t(c);
     }
     else if (c < (1 << 11)) {
         if (d + 1 >= e)
             return false;
+
         d[0] = 0xC0 | (c >> 6);
         d[1] = 0x80 | (c & 0x3f);
         d += 2;
@@ -1103,6 +1105,7 @@ static inline bool encode_utf8(char8_t*& d, char8_t* e, char32_t c)
     else if (c < (1 << 17)) {
         if (d + 2 >= e)
             return false;
+
         d[0] = 0xE0 | (c >> 12);
         d[1] = 0x80 | ((c >> 6) & 0x3f);
         d[2] = 0x80 | (c & 0x3f);
@@ -1111,6 +1114,7 @@ static inline bool encode_utf8(char8_t*& d, char8_t* e, char32_t c)
     else {
         if (d + 3 >= e)
             return false;
+
         d[0] = 0xF0 | ((c >> 18) & 7);          // Ignore upper 11 bits for now
         d[1] = 0x80 | ((c >> 12) & 0x3f);
         d[2] = 0x80 | ((c >> 6) & 0x3f);
@@ -1126,14 +1130,18 @@ static inline bool encode_utf16(char16_t*& d, char16_t* e, char32_t c)
     if (c < (1 << 16)) {
         if (d == e)
             return false;
+        
         *d++ = char16_t(c);     // Ignore that c values in range 0xd800 - 0xe000 are illegal.
     }
     else {
         if (d + 1 >= e)
             return false;
+
         *d++ = 0xd800 | ((c >> 10) & 0x3ff);  // Ignore upper bytes
         *d++ = 0xdc00 | (c & 0x3ff);
     }
+
+    return true;
 }
 
 template<> inline size_t ustring::copy_internal(char* dest, size_t count, iterator& start, char bad_char) const
