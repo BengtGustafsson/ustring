@@ -56,6 +56,11 @@ using namespace std;
     inline constexpr const size_t npos = static_cast<size_t>(-1);
 #endif
 
+    namespace detail {
+    template <typename... Args>
+            constexpr bool dependent_false = false;
+    }
+
 
 // type_trait to detect a character type, which is strangely missing from the current standard.
 template<typename T> struct is_character : bool_constant<false> {};
@@ -185,7 +190,10 @@ private:
     using table_ptr = extra_ptr<mode, char32_t>;
     using impl_ptr = extra_ptr<mode, impl>;
 
-    template<encoding_t E> struct encoding_type_detail;
+    template<encoding_t E> struct encoding_type_detail {
+        static_assert(detail::dependent_false<E>, "Bad enum value to ecoding_type");         // Error to use base case
+        using type = void;   // Silence Clang.
+    };
 
 public:
     // Bidirectional const iterator. When created from the end we can't reliably know if size can be calculated by subtraction.
@@ -207,8 +215,7 @@ public:
 
         // You can compare iterators derived from begin() to iterators derived from end() as comparison is by address.
         bool operator==(const iterator& rhs) const;
-        bool operator<(const iterator& rhs) const;
-        strong_ordering operator<=>(const iterator& rhs) const = default;
+        strong_ordering operator<=>(const iterator& rhs) const;
 
         // There are options for operator- including: a) removing it, b) only allowing it if both iterators start out from the same
         // end, c) only allowing it if both iterators start out from the same end _or_ the encoding is fixed length, or d) let it take
@@ -583,12 +590,6 @@ struct ustring::impl {
         } m_multi;
     };
 };
-
-namespace detail
-{
-    template <typename... Args>
-    constexpr bool dependent_false = false;
-}
 
 //////////////// Method implementations ////////////////
 
@@ -1403,11 +1404,13 @@ inline bool ustring::iterator::operator==(const iterator& rhs) const
     return m_pos == rhs.m_pos && m_part == rhs.m_part;
 }
 
-inline bool ustring::iterator::operator<(const iterator& rhs) const
+inline strong_ordering ustring::iterator::operator<=>(const iterator& rhs) const
 {
-    assert(m_string == rhs.m_string);               // Can only compare within same string, or compare two default constructed iterators
-
-    return m_part < rhs.m_part || m_pos < rhs.m_pos;
+    strong_ordering po = m_part <=> rhs.m_part;
+    if (po != strong_ordering::equal)
+        return po;
+    else
+        return m_pos <=> m_end;
 }
 
 // You can't subtract iterators created from end to those created from begin as we don't know the exact size for all

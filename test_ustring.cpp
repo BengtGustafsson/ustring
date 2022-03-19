@@ -34,9 +34,11 @@ void test_ustring()
 
     STD::ustring a;
     STD::ustring b{ "b" };  // Can't init with = without trailing u as the ctor from character pointer is explicit. b will contain a copy of the literal.
-    STD::ustring c = "c"_u;  // Here the literal is not copied thanks to the u suffix.
+    STD::ustring c = "c"_u;  // Here the literal is not copied thanks to the _u suffix.
     STD::ustring d = L"c"_u;
     assert(c == d);
+    assert(a.begin() == a.end());
+    assert(b.begin() < b.end());
 
     STD::ustring e = b + "hej"_u;
     STD::ustring g = char32_t('!');
