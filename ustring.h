@@ -1,3 +1,28 @@
+/*
+
+Test implementation of a ustring class for possible introduction into the C++ standard library.
+
+This software is provided under the MIT license:
+
+Copyright 2022 Bengt Gustafsson
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files
+(the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify,
+merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Further information at: https://opensource.org/licenses/MIT.
+
+*/
+
+
 #pragma once
 
 #include <cctype>
@@ -11,8 +36,19 @@
 #include <span>
 #include <locale>
 
+#if IS_STANDARDIZED
+
+#define STD std
 namespace std {
 
+#else
+
+#define STD stdx
+namespace stdx {
+
+using namespace std;
+
+#endif
 
 #ifndef HAS_NPOS
 #define HAS_NPOS
@@ -469,15 +505,23 @@ private:
 
 // Literal operators
 namespace literals::string_literals {
-#pragma warning(push)
-#pragma warning(disable: 4455)
     // Note: Can't be made a template as that would be interpreted as a compile time literal operator.
+    inline ustring operator""_u(const char* ptr, size_t sz);
+    inline ustring operator""_u(const wchar_t* ptr, size_t sz);
+    inline ustring operator""_u(const char8_t* ptr, size_t sz);
+    inline ustring operator""_u(const char16_t* ptr, size_t sz);
+    inline ustring operator""_u(const char32_t* ptr, size_t sz);
+
+#ifdef IS_STANDARDIZED
+
     inline ustring operator""u(const char* ptr, size_t sz);
     inline ustring operator""u(const wchar_t* ptr, size_t sz);
     inline ustring operator""u(const char8_t* ptr, size_t sz);
     inline ustring operator""u(const char16_t* ptr, size_t sz);
     inline ustring operator""u(const char32_t* ptr, size_t sz);
-#pragma warning(pop)
+
+#endif
+
 }
 
 
@@ -515,7 +559,7 @@ ustring erase(const ustring& source, const pair<ustring::iterator, ustring::iter
 
 // Split with some mode flags. Keeping flags at default ensures that the original string is recreated by join with the same
 // delimiter.
-vector<ustring> split(const ustring& src, const ustring& delimiter, int max_count = numeric_limits<size_t>::max(), bool trim = false, bool noempties = false);
+vector<ustring> split(const ustring& src, const ustring& delimiter, size_t max_count = numeric_limits<size_t>::max(), bool trim = false, bool noempties = false);
 ustring join(const vector<ustring>& parts, const ustring& delimiter);
 
 
@@ -1289,7 +1333,7 @@ template<character T, size_t SZ> span<T> ustring::copy(span<T, SZ> dest, T bad_c
 //////////////// iterator methods ////////////////
 
 
-inline ustring::iterator::iterator(const ustring& str, part_ptr pos) : m_string(&str), m_index(-1) 
+inline ustring::iterator::iterator(const ustring& str, part_ptr pos) : m_string(&str), m_index(npos) 
 {
     mode m = str.get_mode();
     m_multi = m.storage() == mode::multi;
@@ -1805,7 +1849,7 @@ inline size_t ustring::len_helper(const char32_t* ptr) {
     }
 }
 
-inline std::ustring::part_ptr ustring::get_begin() const {
+inline ustring::part_ptr ustring::get_begin() const {
     switch (get_mode().storage()) {
     case mode::multi:
         return part_ptr(0, m_shared.m_begin);    // Includes the part number
@@ -1827,7 +1871,7 @@ inline std::ustring::part_ptr ustring::get_begin() const {
     return part_ptr(0, nullptr);   // MSVC could not detect that switch cover all storage_t values.
 }
 
-inline std::ustring::part_ptr ustring::get_end() const {
+inline ustring::part_ptr ustring::get_end() const {
     switch (get_mode().storage()) {
     case mode::multi:
         return m_multi.m_end;
@@ -2301,15 +2345,23 @@ inline std::codecvt_base::result ustring_saver::fill(byte* buffer, size_t& sz)
 
 // Literal operators
 namespace literals::string_literals {
-#pragma warning(push)
-#pragma warning(disable: 4455)
+
+    inline ustring operator""_u(const char* ptr, size_t sz) { return ustring::view(ptr, sz); }
+    inline ustring operator""_u(const wchar_t* ptr, size_t sz) { return ustring::view(ptr, sz); }
+    inline ustring operator""_u(const char8_t* ptr, size_t sz) { return ustring::view(ptr, sz); }
+    inline ustring operator""_u(const char16_t* ptr, size_t sz) { return ustring::view(ptr, sz); }
+    inline ustring operator""_u(const char32_t* ptr, size_t sz) { return ustring::view(ptr, sz); }
+
+#ifdef IS_STANDRADIZED
 
     inline ustring operator""u(const char* ptr, size_t sz) { return ustring::view(ptr, sz); }
     inline ustring operator""u(const wchar_t* ptr, size_t sz) { return ustring::view(ptr, sz); }
     inline ustring operator""u(const char8_t* ptr, size_t sz) { return ustring::view(ptr, sz); }
     inline ustring operator""u(const char16_t* ptr, size_t sz) { return ustring::view(ptr, sz); }
     inline ustring operator""u(const char32_t* ptr, size_t sz) { return ustring::view(ptr, sz); }
-#pragma warning(pop)
+
+#endif
+
 }
 
 strong_ordering Lexicographical_compare(const ustring& lhs, const ustring& rhs, const locale& loc);
@@ -2431,7 +2483,7 @@ ustring capitalize(const ustring& src);
 
 // Split with some mode flags. Keeping flags at default ensures that the original string is recreated by join with the same
 // delimiter. 
-inline vector<ustring> split(const ustring& src, const ustring& delimiter, int max_count, bool trim, bool noempties)
+inline vector<ustring> split(const ustring& src, const ustring& delimiter, size_t max_count, bool trim_parts, bool noempties)
 {
     vector<ustring> ret;
     ustring rest = src;
@@ -2448,8 +2500,8 @@ inline vector<ustring> split(const ustring& src, const ustring& delimiter, int m
         
         auto [next, next_end] = rest.find_ends(delimiter);
         ustring part = rest.first(next);       // Could be all of it
-        if (trim)
-            part = std::trim(part);
+        if (trim_parts)
+            part = trim(part);
         if (!noempties || !part.empty())
             ret.push_back(part);
 
@@ -2457,8 +2509,8 @@ inline vector<ustring> split(const ustring& src, const ustring& delimiter, int m
     }
 
     // Count reached, rest must be appended.
-    if (trim)
-        rest = std::trim(rest);
+    if (trim_parts)
+        rest = trim(rest);
     if (!noempties || !rest.empty())
         ret.push_back(rest);
 
