@@ -172,6 +172,7 @@ private:
 
         storage_t storage() const { return m_storage; }
         encoding_t encoding() const { return m_encoding; }
+        encoding_t normalized_encoding() const;  // Never return wide, return utf16 or utf32 depending on OS.
 
         bool is_shared() const { return storage() == shared || storage() == multi; }
         bool has_table() const { return encoding() == table8 || encoding() == table16; }
@@ -360,7 +361,7 @@ public:
     std::u32string u32string() const { return basic_string<char32_t>(); }
 
 	// Accessing the data in its stored encoding.
-    encoding_t encoding() const;          // Return encoding, but for a multi implementation with different encodings or a non-standard internal representation return encoding_t::other.
+    encoding_t encoding() const;                 // Return encoding, but for a multi implementation with different encodings or a non-standard internal representation return encoding_t::other.
 
 	template<character T> const T* data() const; // This checks that T is consistent with the current encoding and returns nullptr if not, or if storage is not contiguous.
 	const byte* data() const;        			 // Generic data. encoding must be used to figure out what it means. Returns nullptr for other encoding.
@@ -1035,6 +1036,16 @@ static ustring::encoding_t normalize(ustring::encoding_t src)
         return ustring::utf32;
 }
 
+ustring::mode::encoding_t ustring::mode::normalized_encoding() const
+{
+    if (m_encoding != wide)
+        return m_encoding;
+    if constexpr (sizeof(wchar_t) == 2)
+        return ustring::mode::utf16;
+    else
+        return ustring::mode::utf32;
+}
+
 
 static bool equivalent(ustring::encoding_t lhs, ustring::encoding_t rhs)
 {
@@ -1500,7 +1511,7 @@ inline bool ustring::iterator::advance(ptrdiff_t by)
 // This helper function returns the remaining steps to take
 inline ptrdiff_t ustring::iterator::advance_in_part(ptrdiff_t by, const byte* beg)
 {
-    switch (m_mode.encoding()) {
+    switch (m_mode.normalized_encoding()) {
     case mode::direct8:
     case mode::direct16:
     case mode::table8:
@@ -1691,6 +1702,9 @@ inline ptrdiff_t ustring::iterator::advance_in_part(ptrdiff_t by, const byte* be
             }
         }
         break;
+
+    default:
+        break;
     }
     }
 
@@ -1753,7 +1767,7 @@ inline void ustring::iterator::load()
     }
     m_index++;
 
-    switch (m_mode.encoding()) {
+    switch ((m_mode.normalized_encoding())) {
     case mode::direct8:
         m_current = *reinterpret_cast<const uint8_t*>(m_pos);
         break;
@@ -1791,6 +1805,10 @@ inline void ustring::iterator::load()
     case mode::utf32:
         m_current = *reinterpret_cast<const uint32_t*>(m_pos);
         break;
+
+    default:
+        assert(false);
+        break;
     }
 }
 
@@ -1813,7 +1831,7 @@ inline void ustring::iterator::init_part()
 inline void ustring::iterator::init_size()
 {
     // For fixed size encodings set up the m_count once and for all.
-    switch (m_mode.encoding()) {
+    switch (m_mode.normalized_encoding()) {
         case mode::direct8:
         case mode::table8:
             m_count = 1;
@@ -1832,6 +1850,9 @@ inline void ustring::iterator::init_size()
         case mode::utf32:
             m_count = 4;
             break;
+
+        default:
+            break;  // For all variable-length encodsing load sets up m_count each time.
     }
 
     load();     // Load is a nop if we're already at end. Instead it sets m_current to 0 in this case.
@@ -1925,10 +1946,10 @@ inline const char32_t* ustring::get_table(uint8_t part) const
 
     case mode::literal:
         return m_literal.m_table.ptr();
+    default:
+        assert(false);
+        return nullptr;   // MSVC and clang could not detect that multi is shaved off before the switch.
     }
-
-    assert(false);
-    return nullptr;   // MSVC could not detect that multi is shaved off before the switch.
 }
 
 inline const ustring& ustring::get_part(uint8_t part) const
@@ -2016,7 +2037,7 @@ inline bool ustring::try_append(const ustring& rhs) {
     mode lmode = get_mode();
     mode rmode = rhs.get_mode();
 
-    if (lmode.storage() == mode::soo && lmode.encoding() == rmode.encoding()) {
+    if (lmode.storage() == mode::soo && lmode.normalized_encoding() == rmode.normalized_encoding()) {
         // Different byte counts allowed depending on table mode of 'this'
         uint8_t spare;
         if (lmode.has_table())
