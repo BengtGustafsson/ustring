@@ -89,6 +89,9 @@ public:
     using reverse_iterator = reverse_iterator<iterator>;
     using const_reverse_iterator = reverse_iterator;
 
+    class loader;
+    class saver;
+
     // Each ustring is conceptually encoded using one of the encodings corresponding to a char type. The narrow encoding
     // is the execution encoding of the compile, as specified on the compiler command line. If the ustring was constructed directly
     // from a ""u literal, a basic_string or a character pointer with or without length the encoding will retain the corresponding
@@ -240,7 +243,7 @@ public:
 
     private:
         friend class ustring;
-        friend class ustring_saver;
+        friend class saver;
         
         const ustring& str() const { return *m_string; }
 
@@ -395,9 +398,6 @@ public:
     template<character T, size_t SZ> span<T> copy(span<T, SZ> dest, T bad_char = '?') const;
 
 private:
-    friend class ustring_loader;
-    friend class ustring_saver;
-    
     size_t len_helper(const char16_t* ptr);
     size_t len_helper(const char32_t* ptr);
 
@@ -461,9 +461,9 @@ private:
 // available at one time.
 // There should be a ctor which takes a ustring::encoding_t also to bypass the conversion using codecvt when we know that the
 // encoding is one of the built in ones.
-class ustring_loader {
+class ustring::loader {
 public:
-    ustring_loader(locale& loc, size_t source_size = 0);
+    loader(locale& loc, size_t source_size = 0);
 
     bool append(const byte* buffer, size_t sz);     // Return false if an illegal char was encountered in the input
 
@@ -491,10 +491,10 @@ private:
 // Helper class used to convert a ustring of any encoding to one or more external buffers of any locale supported encoding.
 // There should be a ctor which takes a ustring::encoding_t also to bypass the conversion using codecvt when we know that the
 // encoding is one of the built in ones.
-class ustring_saver {
+class ustring::saver {
 public:
-    ustring_saver(locale& loc, const ustring& src);
-    ustring_saver(locale& loc, const ustring& src, const ustring::iterator& start);  // Add an end iterator to stop at.
+    saver(locale& loc, const ustring& src);
+    saver(locale& loc, const ustring& src, const ustring::iterator& start);  // Add an end iterator to stop at.
 
     enum safety_margin {
         minimal,                // Basically the length if everything turns out to be ASCII
@@ -1086,7 +1086,23 @@ template<character T> size_t ustring::estimated_size() const
 {
     // This could be made more sopphisticated, as a minimum taking care of the fixed width char and char32_t conversions which can
     // be done exactly, and maybe using some "normal" bytes per code point number for utf8 and utf16
-    return bytes();
+    if (get_mode().storage() != mode::multi)
+        return bytes();
+
+    // Sum up all parts byte counts for the parts this ustring refers to, taking care of the partial first and last part usage.
+    uint8_t part = get_begin().extra();
+    size_t ret = get_part(part).get_end().ptr() - get_begin().ptr();
+    uint8_t endpart = get_end().extra();
+    if (part == endpart)
+        return get_part(part).bytes();
+
+    while (part != endpart) {
+        part++;
+        ret += get_part(part).bytes();
+    }
+    ret += get_end().ptr() - get_part(part).get_begin().ptr();
+
+    return ret;
 }
 
 // These internal methods must be defined before copy.
@@ -2169,9 +2185,9 @@ inline void ustring::unref()
 }
 
 
-//////////////// ustring_loader methods ////////////////
+//////////////// ustring::loader methods ////////////////
 
-inline ustring_loader::ustring_loader(locale& loc, size_t source_size) : m_source_size(source_size), m_locale(loc)
+inline ustring::loader::loader(locale& loc, size_t source_size) : m_source_size(source_size), m_locale(loc)
 {
     assert((has_facet<codecvt<wchar_t, char, mbstate_t>>(m_locale)));
 
@@ -2187,7 +2203,7 @@ inline ustring_loader::ustring_loader(locale& loc, size_t source_size) : m_sourc
     }
 }
 
-inline bool ustring_loader::append(const byte* buffer, size_t sz)
+inline bool ustring::loader::append(const byte* buffer, size_t sz)
 {
     mbstate_t ost{};        // used between sub-conversions if wchar_t is 32 bits.
 
@@ -2256,7 +2272,7 @@ inline bool ustring_loader::append(const byte* buffer, size_t sz)
     return true;
 }
 
-inline void ustring_loader::reallocate(size_t sz)
+inline void ustring::loader::reallocate(size_t sz)
 {
     if (m_capacity_left > 0)
         return;
@@ -2285,7 +2301,7 @@ inline void ustring_loader::reallocate(size_t sz)
     m_str += next;
 }
 
-inline ustring ustring_loader::str() &&
+inline ustring ustring::loader::str() &&
 {
     // Update the end pointer of str.
     auto set_end = [&](ustring& str) {
@@ -2318,24 +2334,24 @@ inline ustring ustring_loader::str() &&
 }
 
 
-//////////////// ustring_saver methods ////////////////
+//////////////// ustring::saver methods ////////////////
 
-inline ustring_saver::ustring_saver(locale& loc, const ustring& src) : m_source(src), m_pos(src.begin()), m_locale(loc)
+inline ustring::saver::saver(locale& loc, const ustring& src) : m_source(src), m_pos(src.begin()), m_locale(loc)
 {
 }
 
-inline ustring_saver::ustring_saver(locale& loc, const ustring& src, const ustring::iterator& start) : m_source(src), m_pos(start), m_locale(loc)
+inline ustring::saver::saver(locale& loc, const ustring& src, const ustring::iterator& start) : m_source(src), m_pos(start), m_locale(loc)
 {
 }
 
-inline size_t ustring_saver::estimated_size(safety_margin margin) const
+inline size_t ustring::saver::estimated_size(safety_margin margin) const
 {
     size_t ret = m_source.bytes();
     size_t sizes[4] = { 10, 11, 20, 40 };       // This can be improved by a lot.
     return ret * sizes[int(margin)] / 10;
 }
 
-inline codecvt_base::result ustring_saver::fill(byte* buffer, size_t& sz)
+inline codecvt_base::result ustring::saver::fill(byte* buffer, size_t& sz)
 {
     assert(sz >= 4);            // Buffer must be at least four bytes or we can get stuck not being able to convert even a single code point.
     
