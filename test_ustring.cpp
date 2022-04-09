@@ -45,6 +45,9 @@ void test_ustring()
     STD::ustring f = e + g;
 
     std::cout << f.string() << std::endl;
+
+    STD::ustring u = "ÅÄÖABC"_u;
+    STD::ustring lower = tolower(u);
 }
 
 
