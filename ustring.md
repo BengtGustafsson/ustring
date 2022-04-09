@@ -8,9 +8,9 @@ mutation, instead bidirectional iterators are used to access individual code poi
 Thanks to the immutability sharing with a reference counted implementation is possible. It is also possible to implement `ustring` such
 that substrings can be created by sharing the same implementation while referring to a subset of its contents. Furthermore the
 somewhat limited API allows concatenation of multiple ustring objects to be performed by referring to the implementation for the
-concatenated pieces. In addition implementations are allowed to refer to literals and other data (that must outlive the ustring) object rather than
-copying literal data to heap memory. The API also allows small object optimization and there is a trade off
-between time to copy those characters and the time to increment a reference count atomically to be made by implementers.
+concatenated parts. In addition implementations are allowed to refer to literals and other data (that must outlive the ustring) object rather than
+copying the data to heap memory. The API also allows small object optimization and there is a trade off
+between time to copy those characters and the time to increment a reference count atomically to be made by implementers. Finally the API has been designed to allow reusing heap buffers if ustrings are created from rvalue basic_string objects.
 
 ## Synopsis
 
@@ -404,9 +404,13 @@ Some functionality is implemented as member functions for compatibility with bas
 bool empty() const;
 
 pair<iterator, iterator> find_ends(const ustring& pattern) const;
+pair<iterator, iterator> find_ends(const ustring& pattern, const iterator& after) const;
 iterator find(const ustring& pattern) const;
+iterator find(const ustring& pattern, const iterator& after) const;
 pair<iterator, iterator> rfind_ends(const ustring& pattern) const;
+pair<iterator, iterator> find_ends(const ustring& pattern, const iterator& before) const;
 iterator rfind(const ustring& pattern) const;
+iterator rfind(const ustring& pattern, const iterator& before) const;
 
 bool contains(const ustring& pattern) const;
 bool starts_with(const ustring& pattern) const;

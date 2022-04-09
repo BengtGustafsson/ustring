@@ -3,12 +3,21 @@
 
 namespace std {
 
-    // Bidirectional iterator to a sequence of unicode code points represented in the different
-    // character encodings.
+    // Bidirectional iterator to a sequence of unicode code points represented in the different character encodings. For this to
+    // work as a regular iterator even if UTF-8 or UTF-16 is stored care must be taken to make sure to never read beyond end. To
+    // make this work it must be assumed that all unicode_iterators refer to the first byte of the representation of a code point
+    // (or exactly after the last code point's representation in case of the end iterator). Thus unicode_iterator can't handle
+    // buffers which may contain partial code points as end would then point in the middle of a code point and the end condition
+    // would not be detected until it is too late.
+    // To achieve this operator* must itself decode the code point pointed to. As operator++ can be called multiple times between
+    // operator*() calls it is not easy to cache the code point length in the iterator or move its interal pointer in operator*().
+    // Instead the moving operators must calculate the length themselves. For UTF-8 and UTF-16 this is possible from the first
+    // byte(s) when incrementing, while for decrementing UTF-8 has to read bytes until they don't have 10 in the two top bits.
+
     template<typename C> class unicode_iterator {
     public:
         unicode_iterator(const C* data);
-        char32_t operator*();
+        char32_t operator*() const;
         unicode_iterator& operator++();
         unicode_iterator& operator++(int);
         unicode_iterator& operator--();
@@ -27,8 +36,17 @@ namespace std {
     template<> class unicode_iterator<char32_t> {
     };
 
-    // Tricky as we can't check for buffer overrun before we already have the last character.
-    // So all overloads must buffer it probably.
+
+    // unicode_output_iterator almost fulfills LegacyOutputIterator. The problem is that to check if another character fits before
+    // end you have to know what that character is. In the regular writing loop you however _first_ test the iterators for
+    // equality, then if not equal, assign a new value to the dereffered iterator and finally increment it. One possibility would
+    // be to be conservative and let iterators compare equal if they are close enough so that the representation of any upcoming
+    // code point can't be ensured to fit. This leaves the iterator placed a few bytes before the end, possibly with room for one
+    // (or even more) code points representations. This however works just fine for the cases where the source ends before the
+    // reserved output buffer (which should be the regular case). In the cases where the destination buffer may end first there are
+    // two possibilities: Either it is ok to deliver a buffer which ends somewhat before the end which is still ok in this case, or
+    // it must be an exact length, possibly containing the first part of a code point, which is thus split between two buffers.
+    // This is a tricky case, but it should be possible to design a helper class to handle this, without too much copying.
     template<typename C> class unicode_output_iterator {
         unicode_output_iterator(C* dest);
         char32_t& operator*();  // This can return a reference to a member, written in operator++.
@@ -36,8 +54,142 @@ namespace std {
         unicode_output_iterator& operator++();
         unicode_output_iterator& operator++(int);
 
-        // Special function which returns false if the value set by assigning to *i fits in the buffer if it ends at end.
-        // This can hardly be operator== as it is not communitive.
-        bool check(const C* end);
+        // Arithmetic possible as this is almost a pointer. This can be used to see how many bytes are valid in a buffer.
+        ptrdiff_t friend operator-(unicode_output_iterator lhs, unicode_output_iterator rhs) const;
+
+        bool operator==(unicode_output_iterator& rhs);      // Return true if close enough to not surely hold a code point's representation.
     };
+
+
+    // unicode_splitter is an augmented output iterator which can handle exact buffer sizes, i.e. split code points between
+    // buffers.
+    // To do this requires a more complex API where buffers are presented to the splitter until the source data ends.
+    template<typename C> class unicode_splitter {
+    public:
+        set_buffer(C* data, size_t count);
+        template<size_t L> set_buffer(span<C, L>& span);
+
+        // Fill buffer, but if close to its end instead convert into m_temporary and copy as many
+        // bytes that will fit into buffer.
+        char32_t& operator*() { return m_code_point; }  // This can return a reference to a member, written in operator++.
+
+        unicode_output_iterator& operator++();
+        unicode_output_iterator& operator++(int);
+
+        size_t used() const { return m_used; }        // Return the number of used bytes.
+        bool full() const { m_used == m_count; }      // Return true if last set buffer is full
+        bool complete() const { return m_start == m_end; }      // Return true if the last code point presented to operator* has been written.
+
+        void reuse() { m_used = 0; }        // Reuse same buffer (presumably after writing it to somewhere else).
+
+    private:
+        C* m_data;
+        size_t m_count;
+        size_T m_used;
+
+        char32_t m_code_point;
+        C m_temporary[4 / sizeof(C)];   // Intermediate code points are stored here.
+
+        uint8_t m_start = 0;
+        uint8_t m_end = 0;
+    };
+
+    // Another approach is to use a callback to empty the buffer. To cater for asynchtronous emptying of the buffer the callback is
+    // allowed to replace the buffer. The callback will be called in the first operator++ call to get the first buffer. This allows
+    // the callback to be a member without resorting to using std::function without partial CTAD.
+    // The callback has signature span<C>(const span<C>&, bool last). First time it is called with an empty span to get a first buffer.
+    // Last time it is called with last == true and accepts an empty span in return. Returning an empty span earlier sets the
+    // filler in a specail aborted state where input data is ignored and it compares equal to a default constructed
+    // unicode_filler<C> (sentinel). This can be used to limit the length of the transfer from the destination side, but note that if
+    // the last buffer was full this may entail loosing some bytes belonging to the last code point.
+    template<typename CB> class unicode_filler {
+    public:
+        using C = decltype(declval<CB>()(declval<span<C>>(), true))::value_type;
+        unicode_filler(CB&& cb) : m_cb(std::forward<CB>(cb)) {}
+        ~unicode_filler() {
+            if (m_used > 0)
+                m_callback(span<C>(m_buffer.data(), m_used), true);
+        }
+        char32_t& operator*() { return m_code_point; }
+
+        unicode_filler& operator++() {
+            if (m_used == m_buffer.size())
+                m_buffer = m_callback(span<C>(m_buffer.data(), m_used), true);
+            if (remainder too small for longest code point representation) {
+                convert into m_temporary;
+                copy first part of m_temporary to last part of m_buffer;
+                while (all didn't fit) {
+                    copy as much as would fit from m_tempary to buffer;
+                    call callback
+                }
+            }
+            else {
+                convert m_code_point directly to m_buffer and increment m_used.
+            }
+            return *this;
+        }
+        unicode_filler& operator++(int) {
+            m_preincrement = true;
+            if (m_code_point == char32_t(-1))
+                return *this;
+
+            return operator++();
+        }
+
+        char32_t m_code_point = char32_t(-1);
+        std::span<C> m_buffer;
+        size_t m_used = 0;
+
+        C m_temporary[4 / sizeof(C)];   // Intermediate code points are stored here.
+
+        uint8_t m_start = 0;
+        uint8_t m_end = 0;
+        bool m_preincrement = false;
+    };
+}
+
+
+// Use cases for output iterators.
+
+// If the buffer may be incomplete:
+template<typename C> void sendBuffersApprox(const char32_t* from, const char32_t* to)
+{
+    C buffer[1024];
+    unicode_output_iterator<C> beg(buffer);
+    unicode_output_iterator<C> i = beg;
+    unicode_output_iterator<C> end(buffer + 1024);
+
+    while (from != to) {
+        if (i == end) {
+            sendBuffer(buffer, i - beg);        // Sand almost 1024 characters
+            i = beg;        // Reuse buffer
+        }
+        *i++ = *from++;
+    }   
+
+    if (i != beg)
+        sendBuffer(buffer, i - beg);        // Sand last part.
+}
+
+// This example gets much neater than the example above. This suggests that maybe this should be the only API and the exactness an
+// extra template parameter or possibly a runtime parameter. This would also simplify the case that each buffer shuld hold the
+// representations of as many complete code points as possible. In this case the temporary storage is used but only to see if it
+// fits, when i doubt. This seems like a good idea. A similar approach could even be used for the encoding based case with only a
+// buffer to buffer conversion function available (think codecvt). The difference is that the filler itself would have to contain a
+// separate buffer in code points to reduce the overhead of calling the codecvt function.
+template<typename C> void sendBuffersExact(const char32_t* from, const char32_t* to)
+{
+    C buffer[1024];
+
+    unicode_filler<C> filler([&](span<C>& buf, size_t count, bool) {
+        if (!buf.empty())
+            sendBuffer(buf.data(), buf.size());
+        return buffer;
+    });
+
+    while (from != to) {
+        // This calls the callback with exacrtly full buffers as specified by the return of the previous
+        // call, up to the last call which is in the unicode_filler<C> dtor.
+        *filler++ = *from++;        
+    }   
 }
