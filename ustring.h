@@ -36,6 +36,7 @@ Further information at: https://opensource.org/licenses/MIT.
 #include <span>
 #include <locale>
 #include <map>
+#include <iostream>
 
 #if IS_STANDARDIZED
 
@@ -103,12 +104,14 @@ public:
     // encoding. In all other cases, including concatenation, the ustring may use the 'other' encoding which means that it is not
     // possible to use data() to retrieve a pointer to the contents.
     enum encoding_t : uint8_t {
-        narrow,
-        wide,
-        utf8,
-        utf16,
-        utf32,
-        other
+        single,         // type is char, constructed from some other locale with table lookup possibility than execution or system.
+        execution,      // type is char, encoding is execution character set, which is convertible to unicode by table lookup
+        system,         // type is char, encoding is system character set, which is convertible to unicode by table lookup
+        wide,           // type is wchar_t, encoding is UTF-16 on Windows, UTF-32 elsewhere.
+        utf8,           // type is char8_t, encoding is UTF-8
+        utf16,          // type is char16_t, encoding is UTF-16
+        utf32,          // type is char32_t, encoding is UTF-32
+        multipart       // ustring is multipart, no direct access is possible.
     };
 
 private:
@@ -122,10 +125,10 @@ private:
     template<typename EX, typename P> class extra_ptr {
     public:
         static_assert(sizeof(EX) <= sizeof(size_t));
-        static const int max_p = 63;
+        static const int max_extra = 63;
 
         extra_ptr(EX extra, const void* ptr) : m_data(size_t(ptr) & 0x81FF'FFFF'FFFF'FFFF | (size_t(extra) << 57)) {
-            assert(size_t(extra) <= max_p);
+            assert(size_t(extra) <= max_extra);
         }
 
         P* ptr() {
@@ -136,7 +139,7 @@ private:
         }
         const P* ptr() const { return const_cast<extra_ptr*>(this)->ptr(); }
         EX extra() const {
-            return EX((m_data >> 57) & max_p);
+            return EX((m_data >> 57) & max_extra);
         }
 
     private:
@@ -145,12 +148,7 @@ private:
 
     using part_ptr = extra_ptr<uint8_t, byte>;
 
-    // These should be implemented using icu, iconv or something like that. Used for encodings like ISO-Latin1 where each byte can be converted to
-    // a code point by table lookup. The 16 bit version is probably hard to find a use case for.
-    static const char32_t* table8_for_current_locale() { return nullptr; }
-    static const char32_t* table16_for_current_locale() { return nullptr; }
-
-    // Compressed mode class containing a two bit storage field and a four bit character encoding field.
+    // Compressed mode class containing a two bit storage field, a three bit character encoding field and a table flag.
     class mode {
     public:
         enum storage_t : uint8_t {
@@ -160,30 +158,16 @@ private:
             literal
         };
 
-        enum encoding_t : uint8_t {
-            direct8 = ustring::narrow,
-            wide = ustring::wide,
-            utf8 = ustring::utf8,
-            utf16 = ustring::utf16,
-            utf32 = ustring::utf32,
-
-            direct16,   // UCS2 data, i.e. first page of UTF-16. No substitution pairs allowed.
-            direct21,   // Special internal mode with 21 bits per code point, and one wasted bit to form 64 bits with 3 code points.
-            direct24,   // Sepcial internal mode with 24 bits per code point. Possibly somewhat faster than direct21.
-            table8,     // 8 bit data such as ISO-latin1 which needs a table lookup to produce code points but is still random accessible.
-            table16     // 16 bit data such as ???exists??? which needs a table lookup to produce code points but is still random accessible.
-        };
-
-        mode() : mode(soo, direct8) {}
+        mode() : mode(soo, single, false) {}
         mode(size_t v) : m_data(uint8_t(v) << 1) {}    // Used in mode_ptr.
-        mode(storage_t storage, encoding_t encoding) : dummy(0), m_storage(storage), m_encoding(encoding), dummy2(0) {}
+        mode(storage_t storage, encoding_t encoding, bool table) : dummy(0), m_storage(storage), m_encoding(encoding), m_table(table), dummy2(0) {}
 
         storage_t storage() const { return m_storage; }
         encoding_t encoding() const { return m_encoding; }
-        encoding_t normalized_encoding() const;  // Never return wide, return utf16 or utf32 depending on OS.
+        encoding_t normalized_encoding() const;  // Never return wide, return utf16 or utf32 depending on OS. Never return system or execution, instead return single (Which means that has_table() must be checked).
 
         bool is_shared() const { return storage() == shared || storage() == multi; }
-        bool has_table() const { return encoding() == table8 || encoding() == table16; }
+        bool has_table() const { return m_table; }
 
         operator uint8_t() { return m_data >> 1; }
     private:
@@ -192,7 +176,8 @@ private:
             struct {
                 uint8_t dummy : 1;
                 storage_t m_storage : 2;
-                encoding_t m_encoding : 4;
+                encoding_t m_encoding : 3;
+                bool m_table : 1;
                 uint8_t dummy2 : 1;
             };
         };
@@ -285,7 +270,7 @@ public:
 
     // This uses soo or reference counting depending on src.m_mode.storage().
     ustring(const ustring& src);
-    ustring(ustring&& src);
+    ustring(ustring&& src) noexcept;
 
     // Ctor from one char
     template<character T> ustring(T c);
@@ -295,31 +280,42 @@ public:
 
     // These ctors copy the contents. Parallel ctors for rvalue references could be added, which as QoI could hold an appropriate
     // basic_string as a union member to save allocations/copying.
-    template<character T, typename Tr = char_traits<T>, typename Al = allocator<T>> ustring(const basic_string<T, Tr, Al>& src) : ustring(src.data(), src.size()) {}
-    template<character T, typename Tr = char_traits<T>, typename Al = allocator<T>> ustring(basic_string<T, Tr, Al>&& src) : ustring(src.data(), src.size()) {}           // Optimization not implemented yet.
-    template<character T, typename Tr = char_traits<T>> ustring(basic_string_view<T, Tr> src) : ustring(src.data(), src.size()) {}
+    template<character T, typename Tr = char_traits<T>, typename Al = allocator<T>>
+    ustring(const basic_string<T, Tr, Al>& src) : ustring(src.data(), src.size()) {}
+    template<character T, typename Tr = char_traits<T>, typename Al = allocator<T>>
+    ustring(basic_string<T, Tr, Al>&& src) : ustring(src.data(), src.size()) {}           // Optimization not implemented yet.
+    template<character T, typename Tr = char_traits<T>>
+    ustring(basic_string_view<T, Tr> src) : ustring(src.data(), src.size()) {}
 
+    // char string based ctors with an extra locale parameter.
+    template<typename Tr = char_traits<char>, typename Al = allocator<char>>
+    ustring(const basic_string<char, Tr, Al>& src, const locale& loc) : ustring(src.data(), src.size(), loc) {}
+    template<typename Tr = char_traits<char>>
+    ustring(basic_string_view<char, Tr> src, const locale& loc) : ustring(src.data(), src.size(), loc) {}
+    
     // Constructors which _copy_ the literals, as these can not be assumed to not be pointers to buffers of changing data.
     // However, null termination is assumed, with respect to element size.
     template<character T> explicit ustring(const T* src);
+    ustring(const char* src, const locale& loc);
 
     // Constructs with copy but does not use strlen.
     // Note that there are no templated array ctors as those would mostly cause unintended lengths when called with
     // C arrays of "sufficent length" used for legacy APIs. Instead let those arrays decay to pointers and call the above ctors
     // which use strlen.
-    template<character T> ustring(const T* src, size_t);						// Interpreted as execution CS
+    template<character T> ustring(const T* src, size_t sz);						// Interpreted as execution CS
+    ustring(const char* src, size_t sz, const locale& loc);
 
     ~ustring() { unref(); }
 
     //--- operators ---
 
     ustring& operator=(const ustring& rhs);
-    ustring& operator=(ustring&& rhs);          // Note: As all ctors are implicit this covers assignment from basic_string<T> too.
+    ustring& operator=(ustring&& rhs) noexcept;          // Note: As all ctors are implicit this covers assignment from basic_string<T> too.
 
     // These create multi implementations if needed. This happens if sum length is not soo or if encodings differ.
-    friend ustring operator+(ustring&& lhs, const ustring& rhs);
-    friend ustring operator+(const ustring& lhs, const ustring& rhs);
+    friend ustring operator+(ustring&& lhs, ustring&& rhs);
     ustring& operator+=(const ustring& rhs);
+    ustring& operator+=(ustring&& rhs);
 
     // Compares according to code point order, i.e. using compare()
     bool operator==(const ustring& rhs) const;
@@ -328,14 +324,24 @@ public:
     //--- methods ---
 
     // Pseudo constructors from string literals used by suffix u literals. Implementations may disable reference counting and
-    // no heap storage needs to be allocated.
-    template<character T> static ustring view(const T*, size_t);
+    // no heap storage needs to be allocated. Note that the char version implies _executaion_ character set, not system. Also, if
+    // it is not possible to get to unicode code points for the execution character set this will create a copy anyway. The
+    // view() with locale likewise implies conversion unless a table can be created.
+    template<character T> static ustring view(const T*, size_t sz);
+    static ustring view(const char*, size_t sz, const locale& loc);
+    template<character T> static ustring view(const T* src) { return view(src, len_helper(src)); }
+    static ustring view(const char* src, const locale& loc) { return view(src, len_helper(src), loc); }
 
-    // Views of lvalue basic_strings should also be provided. Maybe with pos/size to avoid having to mess around with view(str.data() + pos, cnt)
+    // Views of lvalue basic_strings with pos/size to avoid having to mess around with view(str.data() + pos, cnt)
     template<character T, typename Tr = char_traits<T>, typename Al = allocator<T>>
-    static ustring view(const basic_string<T, Tr, Al>& original, size_t pos = 0, size_t count = npos) { return view(original.data() + pos, count); }
+        static ustring view(const basic_string<T, Tr, Al>& original, size_t pos = 0, size_t count = npos) { return view(original.data() + pos, count); }
     template<character T, typename Tr = char_traits<T>>
     static ustring view(const basic_string_view<T, Tr>& original, size_t pos = 0, size_t count = npos) { return view(original.data() + pos, count); }
+ 
+    template<typename Tr = char_traits<char>, typename Al = allocator<char>>
+    static ustring view(const basic_string<char, Tr, Al>& original, const locale& loc, size_t pos = 0, size_t count = npos) { return view(original.data() + pos, count. loc); }
+    template<typename Tr = char_traits<char>>
+    static ustring view(const basic_string_view<char, Tr>& original, const locale& loc, size_t pos = 0, size_t count = npos) { return view(original.data() + pos, count, loc); }
 
     bool empty() { return get_mode().storage() == mode::soo && m_soo.m_count == 0; }
 
@@ -367,7 +373,7 @@ public:
     ustring last(const iterator & from) const { return substr(from, end()); }
 
     // Convert to basic_string by copying the data. This always works regardless of the internal encoding.
-    template<character T> basic_string<T> basic_string(T bad_char = '?') const;
+    template<character T, typename Tr = char_traits<T>, typename Al = allocator<T>> basic_string<T, Tr, Al> basic_string(T bad_char = '?') const;
     string string(char bad_char = '?') const { return basic_string<char>(bad_char); }
     wstring wstring() const { return basic_string<wchar_t>(); }
     u8string u8string() const { return basic_string<char8_t>(); }
@@ -385,8 +391,10 @@ public:
     // corresponding to the different character types. The count parameter indicates the size of dest in Ts. If the entire ustring
     // can't fit in dest a whole number of code points is converted and start is set to point to the next code point.
     // The caller must check if pos == end() to know if the string ended, or try again and get a 0 return.
-    // [We could add a second iterator end to control where to stop].
+    // [We could add a second iterator end to control where to stop, but substr is costless so that's not necesssary].
     template<character T> size_t copy(T* dest, size_t count, iterator& start, T bad_char = '?') const;
+    // Version which converts to the set locale while copying. 
+    size_t copy(char* dest, size_t count, const locale& loc, iterator& start, char bad_char = '?') const;
 
     // Return estimated size needed for copy.
     template<character T> size_t estimated_size() const; 
@@ -394,21 +402,28 @@ public:
     // Simplified version which stops when the dest buffer is full. If this happens it returns the size of the buffer and you don't
     // know if it overflowed or was an exact fit.
     template<character T> size_t copy(T* dest, size_t count, T bad_char = '?') const;
+    size_t copy(char* dest, size_t count, const locale& loc, char bad_char = '?') const;
 
     // Versions of these which takes a span<char_type> are also provided. Note that the return type is always a span with dynamic
     // extent as the length of the ustring is always dynamic.
     template<character T, size_t SZ> span<T> copy(span<T, SZ> dest, iterator& start, T bad_char) const;
     template<character T, size_t SZ> span<T> copy(span<T, SZ> dest, T bad_char = '?') const;
 
+    template<size_t SZ> span<char> copy(span<char, SZ> dest, const locale& loc, iterator& start, char bad_char) const;
+    template<size_t SZ> span<char> copy(span<char, SZ> dest, const locale& loc, char bad_char = '?') const;
+
 private:
     template<typename I, typename E> friend class detail::filler_impl;
     template<character T> static constexpr encoding_t init_encoding_of();
-    size_t len_helper(const char16_t* ptr);
-    size_t len_helper(const char32_t* ptr);
+    static size_t len_helper(const char* ptr) { return strlen(ptr); }
+    static size_t len_helper(const wchar_t* ptr) { return wcslen(ptr); }
+    static size_t len_helper(const char8_t* ptr) { return strlen(reinterpret_cast<const char*>(ptr)); }
+    static size_t len_helper(const char16_t* ptr);
+    static size_t len_helper(const char32_t* ptr);
 
     mode get_mode() const { return m_soo.m_mode; }
-    void set_mode(mode::storage_t storage, mode::encoding_t encoding) { m_soo.m_mode = mode(storage, encoding); }
-
+    void set_mode(mode::storage_t storage, encoding_t encoding, bool table) { m_soo.m_mode = mode(storage, encoding, table); }
+ 
     part_ptr get_begin() const;
     part_ptr get_end() const;
     const char32_t* get_table(uint8_t part) const;
@@ -417,20 +432,22 @@ private:
     const impl& get_impl() const;
     impl& get_impl();
 
-    byte* setup(size_t sz, mode::encoding_t encoding, const char32_t* table = nullptr);
-    template<typename T> T* setup(size_t count, mode::encoding_t encoding = mode::encoding_t(encoding_of<T>), const char32_t* table = nullptr) {
+    byte* setup(size_t sz, encoding_t encoding, const char32_t* table = nullptr);
+    template<typename T> T* setup(size_t count, encoding_t encoding = encoding_of<T>, const char32_t* table = nullptr) {
         return reinterpret_cast<T*>(setup(count * sizeof(T), encoding, table));
     }
+    // Prevent forgetting encoding for char buffers.
+    template<> char* setup<char>(size_t count, encoding_t encoding, const char32_t* table) { return reinterpret_cast<char*>(setup(count, encoding, table)); }
 
     void shrink_to(const void* end);
-    void init(const void* src, size_t sz, mode::encoding_t encoding);
-    void init(const void* src, size_t sz, const char32_t* table, mode::encoding_t encoding);
+    void init(const void* src, size_t sz, encoding_t encoding);
+    void init(const void* src, size_t sz, const char32_t* table, encoding_t encoding);
 
+    static impl* make_multi_impl(int count);
     static impl* make_impl(size_t bytes);
     static impl* make_impl(const char32_t* table, size_t bytes);
     bool try_append(const ustring& rhs);
-    void convert_to_multi(int count);
-    void expand_multi(int count);       // count is the total required count.
+    bool try_prepend(const ustring& lhs);
     void unref();
 
     template<character T> size_t copy_part(T* dest, size_t count, iterator& start, T bad_char = '?') const;
@@ -447,15 +464,14 @@ private:
             impl_ptr m_impl;               // High byte contains mode, this must be anded off to get to the impl.
         } m_multi;
 		struct {    // short string case. This union member used for execution encodings and utf encodings.
-            byte m_data[22];
             uint8_t m_count;   		    // Number of valid bytes.
+            byte m_data[22];
 			mode m_mode;				// One byte mode info. If top 2 bits are 0 mode is shared. Thus it can be overlayed with m_end which always has c_block_bits top bits cleared.
 		} m_soo;
         struct {    // This case is used for short strings which need a table lookup.
-            const char32_t* m_table;    // Table of mappings from 8 or 16 bit data to code points.
-            byte m_data[14];            // Up to 14 bytes of raw data.
             uint8_t m_count;			// Number of valid bytes.
-            mode m_mode;				// One byte mode info. If top 3 bits are 0 or 7 mode is shared. Thus it can be overlayed with m_end which always has at least 3 top bits equal for contemporary CPUs/MMUs.
+            byte m_data[15];            // Up to 15 bytes of raw data.
+            table_ptr m_table;			// Table of mappings from 8 or 16 bit data to code points for "code page" local encodings. (High byte must be anded away.
         } m_soo_table;
         struct {    // Literal case. Encodings can only be execution or utf
             const byte* m_begin;
@@ -471,9 +487,9 @@ private:
 // encoding is one of the built in ones.
 class ustring::loader {
 public:
-    loader(locale& loc, size_t source_size = 0);
+    loader(const locale& loc, size_t source_size = 0);
 
-    bool append(const byte* buffer, size_t sz);     // Return false if an illegal char was encountered in the input
+    bool append(const char* buffer, size_t sz);     // Return false if an illegal char was encountered in the input
 
     bool is_complete() const { return m_complete; }     // False if state is in the middle of a code point after append.
 
@@ -501,8 +517,8 @@ private:
 // encoding is one of the built in ones.
 class ustring::saver {
 public:
-    saver(locale& loc, const ustring& src);
-    saver(locale& loc, const ustring& src, const ustring::iterator& start);  // Add an end iterator to stop at.
+    saver(const locale& loc, const ustring& src);
+    saver(const locale& loc, const ustring& src, const ustring::iterator& start);  // Add an end iterator to stop at.
 
     enum safety_margin {
         minimal,                // Basically the length if everything turns out to be ASCII
@@ -513,15 +529,15 @@ public:
 
     size_t estimated_size(safety_margin) const;        // Return an estimate of how many bytes will be needed for the entire ustring converted to loc, given different safety margins.
 
-     // The return value 'partial' indicates that the entrie src string has not been stored in buffers of this and preceeding fill
+     // The return value 'partial' indicates that the entire src string has not been stored in buffers of this and preceeding fill
      // calls. error indicates conversion error as usual and ok means that the entire string has been converted. In both partial
      // and ok sz is changed to reflect how much of the buffer has been filled. For partial this could be a few bytes less than the
      // entire buffer if the result of converting one more code point would not fit the buffer. For ok return sz is set to indicate
      // where the converted data ends.
-     codecvt_base::result fill(byte* buffer, size_t& sz);
+     codecvt_base::result fill(char* buffer, size_t& sz);
 
 private:
-    ustring m_source;
+    const ustring& m_source;
     ustring::iterator m_pos;
     size_t m_consumed;
     locale m_locale;
@@ -550,6 +566,22 @@ namespace literals::string_literals {
 
 }
 
+
+ostream& operator<<(ostream& os, const ustring& src)
+{
+    ustring::saver s(os.getloc(), src);
+
+    char buffer[1000];
+    while (true) {
+        size_t sz = 1000;
+        auto res = s.fill(buffer, sz);
+        os.write(buffer, sz);
+        if (res != codecvt_base::partial)
+            break;
+    }
+
+    return os;
+}
 
 // Free helper functions. As we are working in unicode code points these can be implemented for international use.
 
@@ -592,8 +624,9 @@ ustring join(const vector<ustring>& parts, const ustring& delimiter);
 //////////////// Impl struct must be defined before methods that use it. ////////////////
 
 struct ustring::impl {
-    impl() {}       // The different ustring ctors and other methods set my fields up.
-    ~impl() {}      // Note: It is the ustring dtor (which knows the mode) that actually destroyes m_locale if it was valid.
+    // There must be a default ctor and dtor of any struct containing a union.
+    impl() {}       // The different ustring ctors and other methods set my fields up, except m_refs.
+    ~impl() {}      // Note: It is the ustring dtor (which knows the mode) that actually destroys valid m_strings elements
 
     atomic<uint32_t> m_refs = 1;        // Should be enough.
     union {
@@ -603,9 +636,9 @@ struct ustring::impl {
             byte m_data[1];			// C style tail.
         } m_table;
         struct {
-            uint8_t m_count;      // Max is 255.
-            uint8_t m_allocated;  // May allocate some at a time in anticipation of further concatenations. Beware however that the string is immutable so this can only happen with refcount == 1 and rvalue lhs of op+.
-            ustring m_strings[1]; // Strings are destroyed by last ustring owning this impl.
+            uint8_t m_count;      // Max is 63 as the part numbers are stored inside pointers.
+            uint8_t m_capacity;  // May allocate some at a time in anticipation of further concatenations. Beware however that the string is immutable so this can only happen with refcount == 1 and rvalue lhs of op+.
+            ustring m_strings[1]; // Strings are destroyed by last ustring owning this impl. Note: Not constructed as it is in a union.
         } m_multi;
     };
 };
@@ -667,9 +700,16 @@ namespace detail {
         return 4;
     }
 
+    // For ASCII source only.
+    inline uint8_t decode(char32_t& dest, const char* src)
+    {
+        assert((*src & 0x80) == 0);
+        dest = *reinterpret_cast<const uint8_t*>(src);
+        return 1;
+    }
 
     // These internal methods must be defined before copy.
-    inline bool encode(char8_t*& d, char8_t* e, char32_t c)
+    inline bool encode(char8_t*& d, const char8_t* e, char32_t c)
     {
         if (c < 128) {
             if (d == e)
@@ -708,7 +748,7 @@ namespace detail {
         return true;
     }
 
-    inline bool encode(char16_t*& d, char16_t* e, char32_t c)
+    inline bool encode(char16_t*& d, const char16_t* e, char32_t c)
     {
         if (c < (1 << 16)) {
             if (d == e)
@@ -727,7 +767,7 @@ namespace detail {
         return true;
     }
 
-    inline bool encode(char32_t*& d, char32_t* e, char32_t c)
+    inline bool encode(char32_t*& d, const char32_t* e, char32_t c)
     {
         if (d >= e)
             return false;
@@ -737,25 +777,117 @@ namespace detail {
     }
 
 
-    // Convert as little as possible at from. This is usually one code point, but if I == E it is one code element. This is the base
-    // implementation.
-    template<character C> void transcode(C*& to, const C*& from)
+    // ASCII only
+    inline bool encode(char*& d, const char* e, char32_t c)
     {
-        *to++ = *from++;
+        if (d >= e)
+            return false;
+
+        assert(c < 128);
+        *d++ = char(c);
     }
 
-    template<character T, character F> void transcode(T*& to, const F*& from)
+
+    // Convert as little as possible at from. This is usually one code point, but if I == E it is one code element.
+    template<character C> bool transcode(C*& to, const C* end, const C*& from)
+    {
+        if (to == end)
+            return false;
+        
+        *to++ = *from++;
+        return true;
+    }
+
+    // If character types are different use decode and encode.
+    template<character T, character F> bool transcode(T*& to, const T* end, const F*& from)
     {
         char32_t tmp;
         from += decode(tmp, from) / sizeof(F);
-        encode(to, to + 4, tmp);        // Caller guarantees dest availability
+        return encode(to, end, tmp);
     }
+
+
+    // The default ustring representation when filling is typically the same as the E type for UTF-8 and UTF-16. For Windows wchar_t is
+    // also UTF-16 but for Linux it is UTF-32 so to save space it is encoded to UTF-8. char always has UTF-8 as the target after
+    // conversion, which means that it has to go via wchar_t but that is the problem of the converter.
+    template<character E> struct default_representation {
+        using type = E;
+    };
+
+    template<> struct default_representation<char> {
+        using type = char8_t;
+    };
+
+    template<> struct default_representation<char32_t> {
+        using type = char8_t;
+    };
+
+    template<size_t sz> struct wchar_encoding {};
+    template<> struct wchar_encoding<2> { using type = char16_t; };
+    template<> struct wchar_encoding<4> { using type = char8_t; };      // Use UTF-8 as the internal representation for wide strings on Linux.
+
+    template<> struct default_representation<wchar_t> {
+        using type = typename wchar_encoding<sizeof(wchar_t)>::type;
+    };
+
+    template<character E> using default_representation_t = detail::default_representation<E>::type;
+
+    class TableManager {
+    public:
+        char32_t* get(const locale& loc) {
+            auto i = m_tables.find(loc.name());
+            if (i != m_tables.end())
+                return i->second.get();
+
+            // First time this locale name is used. Check if a table can be built by trying to convery 1 byte containing all values
+            // from 1 to 255, presuming 0 is always the end marker. Unclear what happens if a value is outside the first 64k page
+            // on windows, but by setting the destination buffer also to just one wchar_t any substitution pairs are excluded.
+            auto& cvt = use_facet<codecvt<wchar_t, char, mbstate_t>>(loc);
+            char32_t table[256];        // This is copied to the heap only if the table could be built successfully.
+            table[0] = 0;
+            for (int i = 1; i < 256; i++) {
+                char c = char(i);
+                mbstate_t state{};
+                const char* from_next;
+                wchar_t to;
+                wchar_t* to_next;
+                auto r = cvt.in(state, &c, &c + 1, from_next, &to, &to + 1, to_next);
+                if (r != codecvt_base::ok) {
+                    m_tables[loc.name()] = nullptr;
+                    return nullptr;
+                }
+
+                table[i] = to;      // As there are no substitution pairs allowed in 1 to code element the 32 bit value is the 16 bit value.
+            }
+
+            // Table is ok. Copy it to heap array
+            auto ptr = make_unique<char32_t[]>(256);
+            auto ret = ptr.get();
+            memcpy(ret, table, 256 * sizeof(char32_t));
+            m_tables[loc.name()] = std::move(ptr);
+            return ret;
+        }
+
+    private:
+        map<string, unique_ptr<char32_t[]>> m_tables;
+    } table_manager;
+
+    ustring::encoding_t encoding_of_locale(const locale& loc)
+    {
+        if (loc == locale())
+            return ustring::execution;
+        else if (loc == locale(""))
+            return ustring::system;
+        else
+            return ustring::single;
+    }
+
 
 } // namespace detail
 
 
 // Specializations needed to be known before method implementations
-template<> struct ustring::encoding_type_detail<ustring::narrow> {
+template<> struct ustring::encoding_type_detail<ustring::single> {
     using type = char;
 };
 template<> struct ustring::encoding_type_detail<ustring::wide> {
@@ -775,7 +907,7 @@ template<> struct ustring::encoding_type_detail<ustring::utf32> {
 template<character T> constexpr ustring::encoding_t ustring::init_encoding_of()
 {
     if constexpr(is_same_v<T, char>)
-        return ustring::narrow;
+        return ustring::single;
     else if constexpr(is_same_v<T, wchar_t>)
         return ustring::wide;
     else if constexpr(is_same_v<T, char8_t>)
@@ -806,7 +938,7 @@ inline ustring::ustring(const ustring& src)
         get_impl().m_refs++;
 }
 
-inline ustring::ustring(ustring&& src)
+inline ustring::ustring(ustring&& src) noexcept
 {
     // First copy the contents
     memcpy(this, &src, sizeof(ustring));
@@ -819,48 +951,44 @@ inline ustring::ustring(ustring&& src)
 // Ctor from one repeated char
 ustring::ustring(size_t count, char32_t c)
 {
-    char32_t* ptr = reinterpret_cast<char32_t*>(setup(count * sizeof(char32_t), mode::utf32));
+    char32_t* ptr = reinterpret_cast<char32_t*>(setup(count * sizeof(char32_t), utf32));
     fill(ptr, ptr + count, c);
 }
 
 template<character T> ustring::ustring(const T* src, size_t sz)
 {
-    init(src, sz * sizeof(T), mode::encoding_t(encoding_of<T>));
+    init(src, sz * sizeof(T), encoding_of<T>);
 }
 
-template<> inline ustring::ustring(const char* src, size_t sz)
-{
-    auto table = table8_for_current_locale();
-    if (table != nullptr) {     // Soo check must make room for table
-        init(src, sz, table, mode::table8);
-    }
-    else
-        init(src, sz, mode::direct8);
-}
+template<> inline ustring::ustring(const char* src, size_t sz) : ustring(src, sz, locale("")) {}
 
 template<> inline ustring::ustring(const wchar_t* src, size_t sz)
 {
-    if constexpr (sizeof(wchar_t) == 2) {
-        auto table = table16_for_current_locale();
-        if (table != nullptr) {     // Soo check must make room for table
-            init(src, sz * sizeof(wchar_t), table, mode::table16);
-        }
-        else
-            init(src, sz * sizeof(wchar_t), mode::utf16);
-    }
+    if constexpr (sizeof(wchar_t) == 2)
+        init(src, sz * sizeof(wchar_t), utf16);
     else
-        init(src, sz * sizeof(wchar_t), mode::utf32);
+        init(src, sz * sizeof(wchar_t), utf32);
 }
 
 template<character T> inline ustring::ustring(T c) : ustring(&c, 1) {}
 
+template<character T> inline ustring::ustring(const T* src) : ustring(src, len_helper(src)) {}						// Interpreted as execution CS
 
-// Specialized as we don't have a generic strlen.
-template<> inline ustring::ustring(const char* src) : ustring(src, strlen(src)) {}						// Interpreted as execution CS
-template<> inline ustring::ustring(const wchar_t* src) : ustring(src, wcslen(src)) {}
-template<> inline ustring::ustring(const char8_t* src) : ustring(src, strlen(reinterpret_cast<const char*>(src))) {}
-template<> inline ustring::ustring(const char16_t* src) : ustring(src, len_helper(src)) {}
-template<> inline ustring::ustring(const char32_t* src) : ustring(src, len_helper(src)) {}
+inline ustring::ustring(const char* src, const locale& loc) : ustring(src, len_helper(src), loc) {}
+
+inline ustring::ustring(const char* src, size_t sz, const locale& loc)
+{
+    auto table = detail::table_manager.get(loc);
+    if (table != nullptr) {     // Soo check must make room for table
+        init(src, sz, table, detail::encoding_of_locale(loc));
+    }
+    else {
+        loader loader(loc, sz);
+        loader.append(src, sz);
+        *this = move(loader).str();
+    }
+}
+
 inline ustring& ustring::operator=(const ustring& rhs)
 {
     if (this == &rhs)
@@ -878,7 +1006,7 @@ inline ustring& ustring::operator=(const ustring& rhs)
     return *this;
 }
 
-inline ustring& ustring::operator=(ustring&& rhs)
+inline ustring& ustring::operator=(ustring&& rhs) noexcept
 {
     if (this == &rhs)
         return *this;
@@ -896,59 +1024,235 @@ inline ustring& ustring::operator=(ustring&& rhs)
     return *this;
 }
 
-inline ustring operator+(ustring&& lhs, const ustring& rhs)
+// Implementation is for two rvalues. This means that if refcount == 1 in shared case we can change reuse the implementation of
+// either if feasible.
+inline ustring operator+(ustring&& lhs, ustring&& rhs)
 {
+    // Get the part count, i.e. 1 if not multi.
+    auto partcount = [](const ustring& s) {
+        if (s.get_mode().storage() != ustring::mode::multi)
+            return 1;
+        else
+            return int(s.m_multi.m_end.extra() - s.m_multi.m_begin.extra()) + 1;
+    };
+
+    // NOTE: dest can be the same as simpl.m_strings in case of compressing a multi string, or it can be
+    // separate in case of forming a new multi-impl.
+    auto copy_active_parts = [](ustring dest[], const ustring& s) {
+        if (s.get_mode().storage() != ustring::mode::multi) {
+            *dest = s;
+            return 1;
+        }
+        
+        // Get the range of active parts in s
+        auto& simpl = s.get_impl().m_multi;
+        int begin_part = s.m_multi.m_begin.extra();
+        int end_part = s.m_multi.m_end.extra();
+        auto src = simpl.m_strings + begin_part;
+
+        // Copy the active parts to dest, noting that there may be overlap in either direction.
+        int count = end_part - begin_part + 1;
+        if (dest < src)
+            copy(src, src + count, dest);
+        else if (dest > src)
+            copy_backward(src, src + count, dest + count);
+
+        // Adjust the first active part's begin to match s's begin.
+        auto& bs = *src;
+        if (bs.get_mode().storage() == ustring::mode::soo) {
+            size_t begin_skip = s.m_multi.m_begin.ptr() - bs.m_soo.m_data;        // Bytes into first used part.
+            assert(begin_skip < ustring::part_ptr::max_extra);
+            if (begin_skip > 0) {
+                // The first used part is partially used and in soo mode. Its contents must be moved down and its count decreased.
+                dest->m_soo.m_count -= uint8_t(begin_skip);
+                memcpy(dest->m_soo.m_data, dest->m_soo.m_data + begin_skip, dest->m_soo.m_count);
+            }
+        }
+        else  // This includes m_literal too.
+            dest->m_shared.m_begin = s.m_multi.m_begin.ptr();
+
+        // Adjust the last active part's end to match s's end.
+        auto& es = src[count - 1];
+        auto& ed = dest[count - 1];
+        if (es.get_mode().storage() == ustring::mode::soo) {
+            size_t end_skip = es.m_soo.m_data + es.m_soo.m_count - s.m_multi.m_end.ptr();
+            assert(end_skip < ustring::part_ptr::max_extra);
+            ed.m_soo.m_count -= uint8_t(end_skip);
+        }
+        else  // This includes m_literal too.
+            ed.m_shared.m_end = s.m_multi.m_end.ptr();
+
+        return count;
+    };
+
+    auto update_ends = [](ustring& s) {
+        assert(s.get_mode().storage() == ustring::mode::multi);
+        auto& simpl = s.get_impl().m_multi;
+
+        const ustring& first = simpl.m_strings[0];
+        if (first.get_mode().storage() == ustring::mode::soo)
+            s.m_multi.m_begin = ustring::part_ptr(0, first.m_soo.m_data);    // Now the begin is the actual beginning of part 0.
+        else
+            s.m_multi.m_begin = ustring::part_ptr(0, first.m_shared.m_begin);   // Just adjust the part number of begin to 0, keeping the offset within.
+
+        const ustring& last = simpl.m_strings[simpl.m_count - 1];
+        if (last.get_mode().storage() == ustring::mode::soo)
+            s.m_multi.m_end = ustring::part_ptr(simpl.m_count - 1, last.m_soo.m_data + last.m_soo.m_count);    // Now the end is the actual end of last part
+        else
+            s.m_multi.m_end = ustring::part_ptr(simpl.m_count - 1, last.m_shared.m_end);      // Just adjust the part number of begin to 0, keeping the offset within.
+    };
+
+
+    // prune the parts of s which are not used, given begin/end. Also move the actual begin/end pointers to the remaining parts
+    auto prune_parts = [&](ustring& s) {
+        assert(s.get_mode().storage() == ustring::mode::multi);
+        assert(s.get_impl().m_refs == 1);
+        auto& simpl = s.get_impl().m_multi;
+
+        simpl.m_count = copy_active_parts(simpl.m_strings, s);
+        update_ends(s);
+    };
+
+//         // Update begin/end pointers in the actual parts (Note: refs == 1).
+//         // Don't adjust part numbers in this stage.
+//         int begin_part = s.m_multi.m_begin.extra();
+//         auto& bs = simpl.m_strings[begin_part];
+//         if (bs.mode().storage() == ustring::mode::soo) {
+//             size_t begin_skip = s.m_multi.m_begin.ptr() - bs.m_soo.m_data;        // Bytes into first used part.
+//             if (begin_skip > 0) {
+//                 // The first used part is partially used and in soo mode. Its contents must be moved down and its count decreased.
+//                 bs.m_soo.m_count -= begin_skip;
+//                 memcpy(bs.m_soo.m_data, bs.m_soo.m_data + begin_skip, bs.m_soo.m_count);
+//             }
+// 
+//             s.m_multi.m_begin = part_ptr(begin_part, bs.m_soo.m_data);
+//         }
+//         else  // This includes m_literal too.
+//             bs.m_shared.m_begin = s.m_multi.m_begin.ptr();
+// 
+//         int end_part = s.m_multi.m_end.extra();
+//         auto& es = simpl.m_strings[end_part];
+//         if (es.mode().storage() == ustring::mode::soo) {
+//             size_t end_skip = es.m_soo.m_data + es.m_soo.m_count - s.multi.m_end.ptr();
+//             es.m_soo.m_count -= end_skip;
+//         }
+//         else
+//             es.m_shared.m_end = s.m_multi.m_end.ptr();
+// 
+//         // Get rid of unused parts.
+//         int org_parts = simpl.m_count;
+//         simpl.m_count = end_part - begin_part + 1;
+// 
+//         if (begin_part > 0) {
+//             copy_n(simpl.m_strings, simpl.m_count, simpl.m_strings + begin_part);
+// 
+//             // Adjust part numbers in begin/end.
+//             if (simpl.m_strings[0].mode().storage() == ustring::mode::soo)
+//                 s.m_multi.m_begin = part_ptr(0, simpl.m_strings[0].m_soo.m_data);    // Now the begin is the actual beginning of part 0.
+//             else
+//                 s.m_multi.m_begin = part_ptr(0, simpl.m_shared.m_begin);   // Just adjust the part number of begin to 0, keeping the offset within.
+// 
+//             const ustring& last = simpl.m_strings[simpl.m_count - 1];
+//             if (last.mode().storage() == ustring::mode::soo)
+//                 s.m_multi.m_begin = part_ptr(0, last.m_soo.m_data + last.m_soo.m_count);    // Now the end is the actual end of last part
+//             else
+//                 s.m_multi.m_begin = part_ptr(0, last.m_shared.m_end);      // Just adjust the part number of begin to 0, keeping the offset within.
+//         }
+// 
+//         if (org_parts > simpl.m_count)
+//             fill_n(simpl.m_strings + simpl.m_count, org_parts - simpl.m_count, ustring());      // release any references to unused parts' impls.
+//     };
+
+    // Handle nops first
+    if (lhs.empty())
+        return move(rhs);
+
+    if (rhs.empty())
+        return move(lhs);
+    
+    // First attempt: Append rhs characters to lhs which must be soo and able to fit rhs contents, which must have same encoding.
     if (lhs.try_append(rhs))
         return lhs;
 
-    if (rhs.get_mode().storage() != ustring::mode::multi && (lhs.get_mode().storage() != ustring::mode::multi || lhs.get_impl().m_refs != 1)) {
-        lhs.convert_to_multi(4);     // Room for some more
-        auto& limpl = lhs.get_impl();
-        new(&limpl.m_multi.m_strings[limpl.m_multi.m_count++]) ustring(rhs);
-        return lhs;
+    // Seconds attempt: If lhs is a short literal prepending to a soo rhs can work.
+    if (rhs.try_prepend(lhs))
+        return rhs;
+
+    // Third attempt: if lhs is uniquely owned multi-part and rhs fits in its spares, append the rhs parts.
+    if (lhs.get_mode().storage() == ustring::mode::multi && lhs.get_impl().m_refs == 1) {
+        prune_parts(lhs);
+        auto& limpl = lhs.get_impl().m_multi;
+        int rparts = partcount(rhs);
+        if (rparts == 1 && limpl.m_strings[limpl.m_count - 1].try_append(rhs))     // First try appending to the last lhs part (not increasing lhs part count)
+            return lhs;
+        
+        if (limpl.m_count + rparts <= limpl.m_capacity) {
+            limpl.m_count += copy_active_parts(limpl.m_strings + limpl.m_count, rhs);
+            update_ends(lhs);
+            return lhs;
+        }
     }
 
-    // If lhs is shared no optimizations are allowed.
-    auto& limpl = lhs.get_impl();
+    // Fourth attempt: If rhs is uniquely owned multi-part and lhs fits in its spares, prepend the lhs parts
+    if (rhs.get_mode().storage() == ustring::mode::multi && rhs.get_impl().m_refs == 1) {
+        prune_parts(rhs);
+        auto& rimpl = rhs.get_impl().m_multi;
+        int lparts = partcount(lhs);
+        if (lparts == 1 && rimpl.m_strings[0].try_prepend(lhs))     // First try prepending to the first rhs part (not increasing rhs part count)
+            return rhs;
 
-    if (limpl.m_multi.m_strings[limpl.m_multi.m_count - 1].try_append(rhs))     // Try appending rhs to the last pre-existing part.
-        return lhs;
-
-    if (rhs.get_mode().storage() == ustring::mode::multi) {
-        auto& rimpl = rhs.get_impl();
-        int count = limpl.m_multi.m_count + rimpl.m_multi.m_count;
-        if (limpl.m_multi.m_allocated < count)
-            lhs.expand_multi(count);
-
-        auto& limpl = lhs.get_impl();       // Redo this load (in this inner scope!
-        for (int r = 0; r < rimpl.m_multi.m_count; r++)
-            new(&limpl.m_multi.m_strings[limpl.m_multi.m_count++]) ustring(rimpl.m_multi.m_strings[r]);
-
-        lhs.m_multi.m_end = ustring::part_ptr(count - 1, limpl.m_multi.m_strings[count - 1].get_end().ptr());
-        return lhs;
+        if (rimpl.m_count + lparts <= rimpl.m_capacity) {
+            copy_active_parts(rimpl.m_strings + lparts, rhs);
+            copy_active_parts(rimpl.m_strings, lhs);
+            rimpl.m_count += lparts;
+            update_ends(rhs);
+            return rhs;
+        }
     }
 
-    if (limpl.m_multi.m_allocated == limpl.m_multi.m_count) {
-        lhs.expand_multi(limpl.m_multi.m_allocated * 3 / 2);     // No shortcut possible. The lvalue version will return a value based on a new multi impl anyway.
-        new(&limpl.m_multi.m_strings[limpl.m_multi.m_count++]) ustring(rhs);
-    }
+    // The main method is to create a new multi-part implementation and just concatenate
+    // lhs and rhs parts into it.
+    int lparts = partcount(lhs);
+    int rparts = partcount(rhs);
 
-    // Now we can just add rhs as a new part.
-    limpl.m_multi.m_strings[limpl.m_multi.m_count++] = rhs;
-    return lhs;
+    // Create a separate ustring with enough multi parts to return.
+    ustring::impl* ip = ustring::make_multi_impl(lparts + rparts + 3);
+    ip->m_multi.m_count = copy_active_parts(ip->m_multi.m_strings, lhs);
+    ip->m_multi.m_count += copy_active_parts(ip->m_multi.m_strings + ip->m_multi.m_count, rhs);
+
+    ustring ret;
+    ret.m_multi.m_impl = ustring::impl_ptr(ustring::mode(ustring::mode::multi, ustring::single, false), ip);
+    update_ends(ret);
+    return ret;
 }
 
+inline ustring operator+(const ustring& lhs, ustring&& rhs)
+{
+    return ustring(lhs) + move(rhs);
+}
+
+inline ustring operator+(ustring&& lhs, const ustring& rhs)
+{
+    return move(lhs) + ustring(rhs);
+}
 
 inline ustring operator+(const ustring& lhs, const ustring& rhs)
 {
-    return ustring(lhs) + rhs;
+    return ustring(lhs) + ustring(rhs);
 }
 
 inline ustring& ustring::operator+=(const ustring& rhs)
 {
-    *this = *this + rhs;
+    *this = move(*this) + rhs;
     return *this;
 }
+
+inline ustring& ustring::operator+=(ustring&& rhs)
+{
+    *this = move(*this) + move(rhs);
+    return *this;
+}
+
 
 inline bool ustring::operator==(const ustring& rhs) const
 {
@@ -977,13 +1281,17 @@ inline strong_ordering ustring::operator<=>(const ustring& rhs) const
         return strong_ordering::less;
 }
 
-template<> inline ustring ustring::view(const char* src, size_t sz)
+template<> inline ustring ustring::view(const char* src, size_t sz) { return view(src, sz, locale("")); }
+inline ustring ustring::view(const char* src, size_t sz, const locale& loc)
 {
+    const char32_t* table = detail::table_manager.get(loc);
+    if (table == nullptr)
+        return ustring(src, sz, loc);
+    
     ustring ret;
     ret.m_literal.m_begin = reinterpret_cast<const byte*>(src);
     ret.m_literal.m_end = reinterpret_cast<const byte*>(src) + sz;
-    const char32_t* table = table8_for_current_locale();
-    ret.m_literal.m_table = table_ptr(mode(mode::literal, table != nullptr ? mode::table8 : mode::direct8), table);
+    ret.m_literal.m_table = table_ptr(mode(mode::literal, detail::encoding_of_locale(loc), table != nullptr), table);
     return ret;
 }
 
@@ -993,12 +1301,10 @@ template<> inline ustring ustring::view(const wchar_t* src, size_t sz)
     ret.m_literal.m_begin = reinterpret_cast<const byte*>(src);
     ret.m_literal.m_end = reinterpret_cast<const byte*>(src) + sz * sizeof(wchar_t);
 
-    if constexpr (sizeof(wchar_t) == 2) {
-        const char32_t* table = table16_for_current_locale();
-        ret.m_literal.m_table = table_ptr(mode(mode::literal, table != nullptr ? mode::table16 : mode::utf16), table);
-    }
+    if constexpr (sizeof(wchar_t) == 2)
+        ret.m_literal.m_table = table_ptr(mode(mode::literal, utf16, false), nullptr);
     else
-        ret.m_literal.m_table = table_ptr(mode(mode::literal, mode::utf32), nullptr);
+        ret.m_literal.m_table = table_ptr(mode(mode::literal, utf32, false), nullptr);
 
     return ret;
 }
@@ -1008,7 +1314,7 @@ template<character T> ustring ustring::view(const T* src, size_t sz)
     ustring ret;
     ret.m_literal.m_begin = reinterpret_cast<const byte*>(src);
     ret.m_literal.m_end = reinterpret_cast<const byte*>(src) + sz * sizeof(T);
-    ret.m_literal.m_table = table_ptr(mode(mode::literal, mode::encoding_t(encoding_of<T>)), nullptr);
+    ret.m_literal.m_table = table_ptr(mode(mode::literal, encoding_of<T>, false), nullptr);
     return ret;
 }
 
@@ -1125,7 +1431,7 @@ inline ustring ustring::substr(const ustring::iterator& from, const ustring::ite
             if (get_mode().has_table()) {
                 ret.m_soo_table.m_count = uint8_t(to.pos() - from.pos());
                 memcpy(ret.m_soo_table.m_data, from.pos(), m_soo_table.m_count);
-                ret.m_soo_table.m_mode = m_soo_table.m_mode;
+                ret.m_soo_table.m_table = m_soo_table.m_table;
             }
             else {
                 ret.m_soo.m_count = uint8_t(to.pos() - from.pos());
@@ -1158,10 +1464,10 @@ inline ustring ustring::substr(const ustring::iterator& from, const ustring::ite
     return ret;
 }
 
-template<character T> basic_string<T> ustring::basic_string(T bad_char) const
+template<character T, typename Tr, typename Al> basic_string<T, Tr, Al> ustring::basic_string(T bad_char) const
 {
     size_t count = estimated_size<T>();
-    std::basic_string<T> ret(count, ' ');
+    std::basic_string<T, Tr, Al> ret(count, ' ');
 
     while (true) {
         size_t len = copy(ret.data(), count);
@@ -1171,15 +1477,16 @@ template<character T> basic_string<T> ustring::basic_string(T bad_char) const
         }
 
         count = count * 3 / 2;
+        ret.resize(count);
     }
 }
 
 inline ustring::encoding_t ustring::encoding() const
 {
     if (get_mode().storage() != mode::multi)
-        return encoding_t(get_mode().encoding());
+        return get_mode().encoding();
 
-    return other;
+    return multipart;
 }
 
 namespace detail {
@@ -1195,14 +1502,23 @@ namespace detail {
     }
 }
 
-ustring::mode::encoding_t ustring::mode::normalized_encoding() const
+ustring::encoding_t ustring::mode::normalized_encoding() const
 {
-    if (m_encoding != wide)
+    switch (m_encoding) {
+    case ustring::wide:
+        if constexpr (sizeof(wchar_t) == 2)
+            return ustring::utf16;
+        else
+            return ustring::utf32;
+
+    case single:
+    case system:
+    case execution:
+        return single;
+
+    default:
         return m_encoding;
-    if constexpr (sizeof(wchar_t) == 2)
-        return ustring::mode::utf16;
-    else
-        return ustring::mode::utf32;
+    }
 }
 
 static bool equivalent(ustring::encoding_t lhs, ustring::encoding_t rhs)
@@ -1222,7 +1538,7 @@ template<character T> const T* ustring::data() const
 
 inline const byte* ustring::data() const
 {
-    if (encoding() == other)
+    if (encoding() == multipart)
         return nullptr;
 
     return get_begin().ptr();
@@ -1239,54 +1555,78 @@ inline size_t ustring::bytes() const
 // Return estimated size needed for copy.
 template<character T> size_t ustring::estimated_size() const
 {
-    // This could be made more sopphisticated, as a minimum taking care of the fixed width char and char32_t conversions which can
+    // This could be made more spphisticated, as a minimum taking care of the fixed width char and char32_t conversions which can
     // be done exactly, and maybe using some "normal" bytes per code point number for utf8 and utf16
     if (get_mode().storage() != mode::multi)
         return bytes();
 
     // Sum up all parts byte counts for the parts this ustring refers to, taking care of the partial first and last part usage.
-    uint8_t part = get_begin().extra();
-    size_t ret = get_part(part).get_end().ptr() - get_begin().ptr();
-    uint8_t endpart = get_end().extra();
-    if (part == endpart)
-        return get_part(part).bytes();
+    int part = m_multi.m_begin.extra();
+    size_t ret = get_part(part).get_end().ptr() - m_multi.m_begin.ptr();
+    int endpart = m_multi.m_end.extra();
 
-    while (part != endpart) {
+    while (part < endpart - 1) {
         part++;
         ret += get_part(part).bytes();
     }
-    ret += get_end().ptr() - get_part(part).get_begin().ptr();
+
+    ret += m_multi.m_end.ptr() - get_part(endpart).get_begin().ptr();
 
     return ret;
 }
 
-template<character C> inline size_t ustring::copy_part(C* dest, size_t count, iterator& start, C bad_char) const
-{
-    if (encoding() == ustring::encoding_of<C>) {
-        const byte* pos = start.pos();
-        size_t bytes = min(count, size_t(get_end().ptr() - pos));
-        memcpy(dest, pos, bytes);
-        start.set_pos(pos + bytes);
-        return bytes;
-    }
 
-    // Get code points from start and encode at dest until dest is full or start is end.
-    C* d = dest;
+template<character C> size_t ustring::copy_part(C* dest, size_t count, iterator& start, C bad_char) const
+{
     C* e = dest + count;
     const byte* end = get_end().ptr();
-    while (start.pos() != end) {
-        if (!detail::encode(d, e, *start))
-            break;
+    auto loop = [&](auto p) {
+        while (reinterpret_cast<const byte*>(p) != end) {
+            if (!detail::transcode(dest, e, p))        // dest has not been moved if transcode failes (which is due to dest hitting end.
+                break;
+        }
+    };
 
-        ++start;
+    const byte* p = start.pos();
+
+    switch (get_mode().normalized_encoding()) {
+     case utf8:
+        loop(reinterpret_cast<const char8_t*>(p));
+        break;
+        
+    case utf16:
+        loop(reinterpret_cast<const char16_t*>(p));
+        break;
+
+    case utf32:
+        loop(reinterpret_cast<const char32_t*>(p));
+        break;
+
+    case single:
+        if (get_mode().has_table()) {
+            const char32_t* table = get_table(0);
+            while (p != end) {
+                if (!detail::encode(dest, e, table[*reinterpret_cast<const uint8_t*>(p++)]))
+                    break;
+            }
+        }
+        else
+            loop(reinterpret_cast<const char*>(p));     // ASCII
+        break;
+
+    default:
+        assert(false);      // Should not be returned from normalized_encoding()
     }
 
-    return d - dest;
+    size_t ret = p - start.pos();
+    start.set_pos(p);
+    return ret;
 }
+
 
 template<> inline size_t ustring::copy_part(char* dest, size_t count, iterator& start, char bad_char) const
 {
-    if (encoding() == narrow) {
+    if (encoding() == single) {
         const byte* pos = start.pos();
         size_t bytes = min(count, size_t(get_end().ptr() - pos));
         memcpy(dest, pos, bytes);
@@ -1395,6 +1735,19 @@ template<character T> size_t ustring::copy(T* dest, size_t count, T bad_char) co
     return copy(dest, count, start, bad_char);
 }
 
+inline size_t ustring::copy(char* dest, size_t count, const locale& loc, iterator& start, char bad_char) const
+{
+
+
+    return size_t();
+}
+
+inline size_t ustring::copy(char* dest, size_t count, const locale& loc, char bad_char) const
+{
+    return size_t();
+}
+
+
 // Versions of these which takes a span<char_type> are also provided. Note that the return type is always a span with dynamic
 // extent as the length of the ustring is always dynamic.
 template<character T, size_t SZ> span<T> ustring::copy(span<T, SZ> dest, iterator& start, T bad_char) const
@@ -1406,6 +1759,18 @@ template<character T, size_t SZ> span<T> ustring::copy(span<T, SZ> dest, iterato
 template<character T, size_t SZ> span<T> ustring::copy(span<T, SZ> dest, T bad_char) const
 {
     return span<T>(dest.data(), copy(dest.data(), dest.size(), bad_char));
+}
+
+template<size_t SZ>
+inline span<char> ustring::copy(span<char, SZ> dest, const locale& loc, iterator& start, char bad_char) const
+{
+    return span<char>(dest.data(), copy(dest.data(), dest.size(), loc, start, bad_char));
+}
+
+template<size_t SZ>
+inline span<char> ustring::copy(span<char, SZ> dest, const locale& loc, char bad_char) const
+{
+    return span<char>(dest.data(), copy(dest.data(), dest.size(), loc, bad_char));
 }
 
 
@@ -1619,11 +1984,8 @@ inline size_t ustring::iterator::advance(const iterator& towards)
 inline ptrdiff_t ustring::iterator::advance_in_part(ptrdiff_t by, const byte* beg)
 {
     switch (m_mode.normalized_encoding()) {
-    case mode::direct8:
-    case mode::direct16:
-    case mode::table8:
-    case mode::table16:
-    case mode::utf32: {
+    case single:
+    case utf32: {
         bool positive = m_index >= 0;
         ptrdiff_t goal = m_index + by;
 
@@ -1662,63 +2024,7 @@ inline ptrdiff_t ustring::iterator::advance_in_part(ptrdiff_t by, const byte* be
         return 0;
     }
 
-    case mode::direct21: {
-        bool positive = m_index >= 0;
-        ptrdiff_t goal = m_index + by;
-
-        // Hopefully something like this can be done given a 0, 3, 6 low part representing 0, 21, 42 bits of shifting.
-        // size_t bytes = m_string->get_end() - m_string->get_begin();
-        // size_t size = bytes * 3 / 8;        // Approximately ok, but is it exactly ok for any encoding of 0,1,2 in the low 3 bits? If so probably 0, 2, 5 or 0, 3, 5 or 0, 3, 6
-
-        // Safer way, which works with 0, 1, 2 encoding:
-        uint8_t bl = size_t(beg) & 3;
-        uint8_t el = size_t(m_end) & 3;
-        size_t size = (beg - bl - (m_end - el)) / 8 * 3 + el - bl;
-
-        // Same logic for endpoints applies:
-        if (positive) {
-            if (goal < 0) {
-                m_index = 0;
-                m_pos = beg;
-                load();
-                return -goal;
-            }
-            if (size_t(goal) > size) {
-                m_index = size;
-                m_pos = m_end;
-                return goal - m_index;
-            }
-        }
-        else {
-            if (goal >= -1) {
-                m_index = -1;
-                m_pos = m_end;
-                return goal + 1;
-            }
-            if (goal < -1 - ptrdiff_t(size)) {
-                m_index = -1 - size;
-                m_pos = beg;
-                load();
-                return goal - m_index;
-            }
-        }
-
-        // But the addition is a bit trickier.
-        uint8_t pl = size_t(m_pos) & 3;
-        uint8_t byl = by % 3; // Correct for by < 0?
-        m_pos = (m_pos - pl) + 8 * (by / 3);
-
-        uint8_t al = byl + pl;       // When summing the 0-2 valued low bits this can overflow, in which case we're on the next 
-        if (al > 2) {
-            al -= 3;
-            m_pos += 8;
-        }
-        m_pos += al;
-
-        break;
-    }
-
-    case mode::utf8:
+    case utf8:
         // Code is different depending on the direction.
         if (by >= 0) {
             for (ptrdiff_t i = 0; i < by; i++) {
@@ -1769,7 +2075,7 @@ inline ptrdiff_t ustring::iterator::advance_in_part(ptrdiff_t by, const byte* be
 
         break;
 
-    case mode::utf16: {
+    case utf16: {
         if (by >= 0) {
             for (ptrdiff_t i = 0; i < by; i++) {
                 if (m_pos + 2 > m_end)
@@ -1832,46 +2138,27 @@ inline void ustring::iterator::load()
     m_index++;
 
     switch ((m_mode.normalized_encoding())) {
-    case mode::direct8:
-        m_current = *reinterpret_cast<const uint8_t*>(m_pos);
+    case single:
+        if (m_mode.has_table())
+            m_current = m_string->get_table(m_part)[*reinterpret_cast<const uint8_t*>(m_pos)];
+        else
+            m_current = *reinterpret_cast<const uint8_t*>(m_pos);
         break;
 
-    case mode::direct16:
-        m_current = *reinterpret_cast<const uint16_t*>(m_pos);
-        break;
-
-    case mode::direct21: {
-        auto low = size_t(m_pos) & 3;
-        m_current = (*reinterpret_cast<const uint64_t*>(m_pos - low) >> (low * 21)) & 0x1FFFFF;
-        m_count = low == 2 ? 6 : 1;
-        break;
-    }
-    case mode::direct24:
-        memcpy(&m_current, m_pos, 3);      // Little endian assumed.
-        break;
-
-    case mode::table8:
-        m_current = m_string->get_table(m_part)[*reinterpret_cast<const uint8_t*>(m_pos)];
-        break;
-
-    case mode::table16:
-        m_current = m_string->get_table(m_part)[*reinterpret_cast<const uint16_t*>(m_pos)];
-        break;
-
-    case mode::utf8:
+    case utf8:
         m_count = detail::decode(m_current, reinterpret_cast<const char8_t*>(m_pos));
         break;
 
-    case mode::utf16:
+    case utf16:
         m_count = detail::decode(m_current, reinterpret_cast<const char16_t*>(m_pos));
         break;
 
-    case mode::utf32:
+    case utf32:
         m_current = *reinterpret_cast<const uint32_t*>(m_pos);
         break;
 
     default:
-        assert(false);
+        assert(false);  // Normalized encoding should not return anything else.
         break;
     }
 }
@@ -1896,22 +2183,11 @@ inline void ustring::iterator::init_size()
 {
     // For fixed size encodings set up the m_count once and for all.
     switch (m_mode.normalized_encoding()) {
-        case mode::direct8:
-        case mode::table8:
+        case single:
             m_count = 1;
             break;
 
-        case mode::direct16:
-        case mode::table16:
-            m_count = 2;
-            break;
-
-        case mode::direct24:
-            m_count = 3;
-            m_current = 0;      // The high byte would otherwise not be set.
-            break;
-
-        case mode::utf32:
+        case utf32:
             m_count = 4;
             break;
 
@@ -2006,10 +2282,11 @@ inline const char32_t* ustring::get_table(uint8_t part) const
         return get_impl().m_table.m_table;
 
     case mode::soo:
-        return m_soo_table.m_table;
+        return m_soo_table.m_table.ptr();
 
     case mode::literal:
         return m_literal.m_table.ptr();
+
     default:
         assert(false);
         return nullptr;   // MSVC and clang could not detect that multi is shaved off before the switch.
@@ -2037,16 +2314,16 @@ inline ustring::impl& ustring::get_impl() {
     return *m_shared.m_impl.ptr();
 }
 
-inline byte* ustring::setup(size_t sz, mode::encoding_t encoding, const char32_t* table)
+inline byte* ustring::setup(size_t sz, encoding_t encoding, const char32_t* table)
 {
     if (table == nullptr) {
         if (sz <= sizeof(m_soo.m_data)) {   // soo implementation without table
             m_soo.m_count = uint8_t(sz);
-            m_soo.m_mode = mode(mode::soo, encoding);
+            m_soo.m_mode = mode(mode::soo, encoding, false);
             return m_soo.m_data;
         }
         else { // m_shared implementation without table.
-            m_shared.m_impl = impl_ptr(mode(mode::shared, encoding), make_impl(sz));
+            m_shared.m_impl = impl_ptr(mode(mode::shared, encoding, false), make_impl(sz));
             m_shared.m_begin = get_impl().m_data;
             m_shared.m_end = m_shared.m_begin + sz;
             return m_shared.m_impl.ptr()->m_data;
@@ -2055,14 +2332,13 @@ inline byte* ustring::setup(size_t sz, mode::encoding_t encoding, const char32_t
     else {
         if (sz <= sizeof(m_soo_table.m_data)) {
             // soo implemenation with table
-            m_soo_table.m_table = table;
+            m_soo_table.m_table = table_ptr(mode(mode::soo, encoding, true), table);
             m_soo_table.m_count = uint8_t(sz);
-            m_soo_table.m_mode = mode(mode::soo, mode::table8);
             return m_soo_table.m_data;
         }
         else {
             // m_shared implementation with table.
-            m_shared.m_impl = impl_ptr(mode(mode::shared, mode::table8), make_impl(table, sz));
+            m_shared.m_impl = impl_ptr(mode(mode::shared, encoding, true), make_impl(table, sz));
             m_shared.m_begin = m_shared.m_impl.ptr()->m_table.m_data;
             m_shared.m_end = m_shared.m_begin + sz;
             return m_shared.m_impl.ptr()->m_table.m_data;
@@ -2073,7 +2349,7 @@ inline byte* ustring::setup(size_t sz, mode::encoding_t encoding, const char32_t
 inline void ustring::shrink_to(const void* end)
 {
     if (get_mode().storage() == mode::soo) {
-        if (get_mode().encoding() == mode::table8 || get_mode().encoding() == mode::table16)
+        if (get_mode().has_table())
             m_soo_table.m_count = uint8_t(reinterpret_cast<const byte*>(end) - m_soo_table.m_data);
         else
             m_soo.m_count = uint8_t(reinterpret_cast<const byte*>(end) - m_soo.m_data);
@@ -2085,13 +2361,13 @@ inline void ustring::shrink_to(const void* end)
         assert(false);      // Literals or multi can't be shrunk.
 }
 
-inline void ustring::init(const void* src, size_t sz, mode::encoding_t encoding)
+inline void ustring::init(const void* src, size_t sz, encoding_t encoding)
 {
     memcpy(setup(sz, encoding), src, sz);
 }
 
 
-inline void ustring::init(const void* src, size_t sz, const char32_t* table, mode::encoding_t encoding)
+inline void ustring::init(const void* src, size_t sz, const char32_t* table, encoding_t encoding)
 {
     memcpy(setup(sz, encoding, table), src, sz);
 }
@@ -2116,6 +2392,16 @@ inline bool ustring::try_append(const ustring& rhs) {
     mode lmode = get_mode();
     mode rmode = rhs.get_mode();
 
+    auto same_table = [&] {
+        if (lmode.has_table() != rmode.has_table())
+            return false;
+        
+        if (!lmode.has_table())
+            return true;
+        
+        return m_soo_table.m_table.ptr() == rhs.m_soo_table.m_table.ptr();
+    };
+
     if (lmode.storage() == mode::soo && lmode.normalized_encoding() == rmode.normalized_encoding()) {
         // Different byte counts allowed depending on table mode of 'this'
         uint8_t spare;
@@ -2125,16 +2411,16 @@ inline bool ustring::try_append(const ustring& rhs) {
             spare = sizeof(m_soo.m_data) - m_soo.m_count;
 
         if (rmode.storage() == mode::soo) {
-            if (spare >= rhs.m_soo.m_count && (!lmode.has_table() || m_soo_table.m_table == rhs.m_soo_table.m_table)) { // Append possible, and table equal (assuming each unique table has only one instance)
-                memcpy(m_soo.m_data + sizeof(m_soo.m_data) - spare, rhs.m_soo.m_data, rhs.m_soo.m_count);  // goto end of m_data and subtract spare to handle also m_soo_table case.
+            if (spare >= rhs.m_soo.m_count && same_table()) { // Append possible, and table equal (assuming each unique table has only one instance)
+                memcpy(m_soo.m_data + m_soo.m_count, rhs.m_soo.m_data, rhs.m_soo.m_count);  // goto end of m_data and subtract spare to handle also m_soo_table case.
                 m_soo.m_count += rhs.m_soo.m_count;
                 return true;
             }
         }
-        else if (rmode.storage() == mode::literal && (!lmode.has_table() || m_soo_table.m_table == rhs.m_literal.m_table.ptr())) {
+        else if (rmode.storage() == mode::literal && same_table()) {
             ptrdiff_t rlen = rhs.m_literal.m_end - rhs.m_literal.m_begin;
             if (spare >= rlen) {
-                memcpy(m_soo.m_data + sizeof(m_soo.m_data) - spare, rhs.m_literal.m_begin, rlen);  // goto end of m_data and subtract spare to handle also m_soo_table case.
+                memcpy(m_soo.m_data + m_soo.m_count, rhs.m_literal.m_begin, rlen);  // goto end of m_data and subtract spare to handle also m_soo_table case.
                 m_soo.m_count += uint8_t(rlen);
                 return true;
             }
@@ -2144,46 +2430,59 @@ inline bool ustring::try_append(const ustring& rhs) {
     return false;
 }
 
-inline void ustring::convert_to_multi(int count)
-{
-    assert(count <= part_ptr::max_p);            // TODO: Merge strings by reallocation to reduce count enough.
-    assert(get_mode().storage() != mode::multi);
+// If lhs is not literal this never works.
+inline bool ustring::try_prepend(const ustring& lhs) {
+    // Check if lhs + rhs fits into the soo storage of lhs
+    mode rmode = get_mode();
+    mode lmode = lhs.get_mode();
 
-    // Create room for four m_string:s initially.
-    byte* impl_bytes = new byte[sizeof(impl) + (count - 1) * sizeof(ustring)];
-    auto ip = new(impl_bytes) impl;
-    ip->m_multi.m_allocated = count;
-    new(&ip->m_multi.m_strings[0]) ustring(*this);
-    ip->m_multi.m_count = 1;
+    auto same_table = [&] {
+        if (lmode.has_table() != rmode.has_table())
+            return false;
 
-    // Now set up this to use refer to impl!
-    this->~ustring();
-    m_multi.m_impl = impl_ptr(mode(mode::multi, mode::direct8), ip);
-    m_multi.m_begin = ip->m_multi.m_strings[0].get_begin();
-    m_multi.m_end = ip->m_multi.m_strings[0].get_end();
+        if (!lmode.has_table())
+            return true;
+
+        return m_soo_table.m_table.ptr() == lhs.m_soo_table.m_table.ptr();
+    };
+
+    if (rmode.storage() == mode::soo && lmode.normalized_encoding() == rmode.normalized_encoding()) {
+        // Different byte counts allowed depending on table mode of 'this'
+        uint8_t spare;
+        if (rmode.has_table())
+            spare = sizeof(m_soo_table.m_data) - m_soo_table.m_count;
+        else
+            spare = sizeof(m_soo.m_data) - m_soo.m_count;
+
+        if (lmode.storage() == mode::literal && same_table()) {
+            ptrdiff_t llen = lhs.m_literal.m_end - lhs.m_literal.m_begin;
+            if (spare >= llen) {
+                copy_backward(m_soo.m_data, m_soo.m_data + m_soo.m_count, m_soo.m_data + m_soo.m_count + uint8_t(llen));
+                memcpy(m_soo.m_data, lhs.m_literal.m_begin, llen);  // goto end of m_data and subtract spare to handle also m_soo_table case.
+                m_soo.m_count += uint8_t(llen);
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
-inline void ustring::expand_multi(int count)
+
+inline ustring::impl* ustring::make_multi_impl(int count)
 {
-    assert(count <= part_ptr::max_p);            // TODO: Merge strings by reallocation to reduce count enough.
-    assert(get_mode().storage() == mode::multi);
+    assert(count <= part_ptr::max_extra);            // TODO: Merge strings by reallocation to reduce count enough.
 
-    auto& oldImpl = get_impl();
-    uint8_t oldCount = oldImpl.m_multi.m_count;
+    auto ip = make_impl(sizeof(impl) + (count - 1) * sizeof(ustring));
+    ip->m_multi.m_capacity = count;
+    ip->m_multi.m_count = 0;
+    for (uint8_t i = 0; i < count; i++)
+        new(&ip->m_multi.m_strings[i]) ustring;        // All ustrings are constructed.
 
-    // Create a new impl and move all existing parts into it.
-    byte* impl_bytes = new byte[sizeof(impl) + (count - 1) * sizeof(ustring)];
-    auto ip = new(impl_bytes) impl;
-    ip->m_multi.m_allocated = count;
-    ip->m_multi.m_count = oldCount;
-    for (int r = 0; r < oldCount; r++)
-        new(&ip->m_multi.m_strings[r]) ustring(oldImpl.m_multi.m_strings[r]);
-    
-    unref();
-    m_multi.m_impl = impl_ptr(mode(mode::multi, mode::direct8), ip);
-    m_multi.m_begin = part_ptr(0, ip->m_multi.m_strings[0].get_begin().ptr());
-    m_multi.m_end = part_ptr(oldCount - 1, ip->m_multi.m_strings[oldCount - 1].get_end().ptr());
+    return ip;
 }
+
+// count is the total required count. Used when appending two multi strings.
 
 inline void ustring::unref()
 {
@@ -2206,77 +2505,7 @@ inline void ustring::unref()
 }
 
 
-//////////////// ustring::loader methods and specializations ////////////////
-
-// Needs to be before the class definition of filler.
 namespace detail {
-
-    // The default ustring representation when filling is typically the same as the E type for UTF-8 and UTF-16. For Windows wchar_t is
-    // also UTF-16 but for Linux it is UTF-32 so to save space it is encoded to UTF-8. char always has UTF-8 as the target after
-    // conversion, which means that it has to go via wchar_t but that is the problem of the converter.
-    template<character E> struct default_representation {
-        using type = E;
-    };
-
-    template<> struct default_representation<char> {
-        using type = char8_t;
-    };
-
-    template<> struct default_representation<char32_t> {
-        using type = char8_t;
-    };
-
-    template<size_t sz> struct wchar_encoding {};
-    template<> struct wchar_encoding<2> { using type = char16_t; };
-    template<> struct wchar_encoding<4> { using type = char8_t; };      // Use UTF-8 as the internal representation for wide strings on Linux.
-
-    template<> struct default_representation<wchar_t> {
-        using type = typename wchar_encoding<sizeof(wchar_t)>::type;
-    };
-
-    template<character E> using default_representation_t = detail::default_representation<E>::type;
-
-    class TableManager {
-    public:
-        char32_t* get(locale& loc) {
-            auto i = m_tables.find(loc.name());
-            if (i != m_tables.end())
-                return i->second.get();
-
-            // First time this locale name is used. Check if a table can be built by trying to convery 1 byte containing all values
-            // from 1 to 255, presuming 0 is always the end marker. Unclear what happens if a value is outside the first 64k page
-            // on windows, but by setting the destination buffer also to just one wchar_t any substitution pairs are excluded.
-            auto& cvt = use_facet<codecvt<wchar_t, char, mbstate_t>>(loc);
-            char32_t table[256];        // This is copied to the heap only if the table could be built successfully.
-            table[0] = 0;
-            for (int i = 1; i < 256; i++) {
-                char c = char(i);
-                mbstate_t state{};
-                const char* from_next;
-                wchar_t to;
-                wchar_t* to_next;
-                auto r = cvt.in(state, &c, &c + 1, from_next, &to, &to + 1, to_next);
-                if (r != codecvt_base::ok) {
-                    m_tables[loc.name()] = nullptr;
-                    return nullptr;
-                }
-
-                table[i] = to;      // As there are no substitution pairs allowed in 1 to code element the 32 bit value is the 16 bit value.
-            }
-
-            // Table is ok. Copy it to heap array
-            auto ptr = make_unique<char32_t[]>(256);
-            auto ret = ptr.get();
-            memcpy(ret, table, 256 * sizeof(char32_t));
-            m_tables[loc.name()] = std::move(ptr);
-            return ret;
-        }
-        
-    private:
-        map<string, unique_ptr<char32_t[]>> m_tables;
-    } table_manager;
-
-
     // Base case is used for combinations of char8_t, char16_t and char32_t which need transcoding but not codecvt calls.
     template<typename I, typename E> class filler_impl {
         static const size_t c_rawSize = 64 / sizeof(E); // Just a small buffer as we don't have to think about the codecvt::in overhead.
@@ -2323,13 +2552,11 @@ namespace detail {
 
             while (from < end) { // Loop until m_buffer contains at most 4 / sizeof(E) code elements, or is empty in the last call.
                 // First make sure that m_part can hold one code point.
-                if (m_part_ptr >= m_part_end - 4 / sizeof(I)) {
+                if (!transcode(m_part_ptr, m_part_end, from)) {
                     m_part.shrink_to(m_part_ptr);
                     m_str += m_part;
                     setup(m_next_size, m_next_size * 3 / 2);
                 }
-
-                transcode(m_part_ptr, from);
             }
 
             // Move the last unconverted code elements to the front of m_buffer and set m_buf_ptr after them
@@ -2528,6 +2755,9 @@ namespace detail {
 
 }  // namespace detail
 
+
+//////////////// ustring::filler methods and specializations ////////////////
+
 // The filler class presents an output_iterator API for adding E characters to an internal representation which defaults to
 // some implementation defined value, given the E. If an application knows which representation it will ultimately extract the
 // string in this can be provided as the I template parameter. If E is char a constructor taking a locale object is available.
@@ -2551,23 +2781,23 @@ private:
 
 //////////////// ustring::loader methods ////////////////
 
-inline ustring::loader::loader(locale& loc, size_t source_size) : m_source_size(source_size), m_locale(loc)
+inline ustring::loader::loader(const locale& loc, size_t source_size) : m_source_size(source_size), m_locale(loc)
 {
     assert((has_facet<codecvt<wchar_t, char, mbstate_t>>(m_locale)));
 
     if (source_size > 0) {
         // As an initial attempt, and as we don't know anything about the source encoding, assume same size as source.
         if constexpr (sizeof(wchar_t) == 2)
-            m_buffer = m_str.setup(source_size, ustring::mode::utf16);
+            m_buffer = m_str.setup(source_size, utf16);
         else
-            m_buffer = m_str.setup(source_size, ustring::mode::utf8);      // On linux do a double conversion resulting in utf8 which is mostly used there.
+            m_buffer = m_str.setup(source_size, utf8);      // On linux do a double conversion resulting in utf8 which is mostly used there.
 
         m_capacity_left = source_size;
         m_allocated_size = source_size;
     }
 }
 
-inline bool ustring::loader::append(const byte* buffer, size_t sz)
+inline bool ustring::loader::append(const char* buffer, size_t sz)
 {
     mbstate_t ost{};        // used between sub-conversions if wchar_t is 32 bits.
 
@@ -2579,9 +2809,9 @@ inline bool ustring::loader::append(const byte* buffer, size_t sz)
             auto& cvt = use_facet<codecvt<wchar_t, char, mbstate_t>>(m_locale);
             const char* from_next;
             wchar_t* to_next;
-            auto result = cvt.in(m_state, reinterpret_cast<const char*>(buffer), reinterpret_cast<const char*>(buffer) + sz, from_next, reinterpret_cast<wchar_t*>(m_buffer), reinterpret_cast<wchar_t*>(m_buffer) + m_capacity_left, to_next);
+            auto result = cvt.in(m_state, buffer, buffer + sz, from_next, reinterpret_cast<wchar_t*>(m_buffer), reinterpret_cast<wchar_t*>(m_buffer) + m_capacity_left, to_next);
             size_t produced_bytes = reinterpret_cast<byte*>(to_next) - m_buffer;
-            size_t consumed_bytes = reinterpret_cast<const byte*>(from_next) - buffer;
+            size_t consumed_bytes = from_next - buffer;
             sz -= consumed_bytes;
             m_consumed_so_far += consumed_bytes;
             m_buffer += produced_bytes;
@@ -2598,8 +2828,8 @@ inline bool ustring::loader::append(const byte* buffer, size_t sz)
             const char* from_next;
             wchar_t temp[1024];     // 4096 bytes on the stack.
             wchar_t* temp_next;
-            auto result = cvt.in(m_state, reinterpret_cast<const char*>(buffer), reinterpret_cast<const char*>(buffer) + sz, from_next, temp, temp + 1024, temp_next);
-            size_t consumed_bytes = reinterpret_cast<const byte*>(from_next) - buffer;
+            auto result = cvt.in(m_state, buffer, buffer + sz, from_next, temp, temp + 1024, temp_next);
+            size_t consumed_bytes = from_next - buffer;
             sz -= consumed_bytes;
             m_consumed_so_far += consumed_bytes;
 
@@ -2657,9 +2887,9 @@ inline void ustring::loader::reallocate(size_t sz)
 
     ustring next;
     if constexpr (sizeof(wchar_t) == 2)
-        m_buffer = next.setup(m_capacity_left, ustring::mode::utf16);
+        m_buffer = next.setup(m_capacity_left, utf16);
     else
-        m_buffer = next.setup(m_capacity_left, ustring::mode::utf8);      // On linux do a double conversion resulting in utf8 which is mostly used there.
+        m_buffer = next.setup(m_capacity_left, utf8);      // On linux do a double conversion resulting in utf8 which is mostly used there.
 
     m_allocated_size += m_capacity_left;
     m_str += next;
@@ -2700,11 +2930,11 @@ inline ustring ustring::loader::str() &&
 
 //////////////// ustring::saver methods ////////////////
 
-inline ustring::saver::saver(locale& loc, const ustring& src) : m_source(src), m_pos(src.begin()), m_locale(loc)
+inline ustring::saver::saver(const locale& loc, const ustring& src) : m_source(src), m_pos(src.begin()), m_locale(loc)
 {
 }
 
-inline ustring::saver::saver(locale& loc, const ustring& src, const ustring::iterator& start) : m_source(src), m_pos(start), m_locale(loc)
+inline ustring::saver::saver(const locale& loc, const ustring& src, const ustring::iterator& start) : m_source(src), m_pos(start), m_locale(loc)
 {
 }
 
@@ -2715,7 +2945,7 @@ inline size_t ustring::saver::estimated_size(safety_margin margin) const
     return ret * sizes[int(margin)] / 10;
 }
 
-inline codecvt_base::result ustring::saver::fill(byte* buffer, size_t& sz)
+inline codecvt_base::result ustring::saver::fill(char* buffer, size_t& sz)
 {
     assert(sz >= 4);            // Buffer must be at least four bytes or we can get stuck not being able to convert even a single code point.
     
@@ -2727,7 +2957,7 @@ inline codecvt_base::result ustring::saver::fill(byte* buffer, size_t& sz)
         const wchar_t* from_next;
         char* to_next;
         auto result = cvt.out(m_state, start + m_consumed, reinterpret_cast<const wchar_t*>(m_source.get_end().ptr()), from_next, reinterpret_cast<char*>(buffer), reinterpret_cast<char*>(buffer) + sz, to_next);
-        sz = to_next - reinterpret_cast<char*>(buffer);
+        sz = to_next - buffer;
 
         if (result == codecvt_base::noconv)
             assert(false);      // Unclear how to handle this. Does it mean that conversion is impossible or that we can just copy the buffers?
@@ -2750,8 +2980,8 @@ inline codecvt_base::result ustring::saver::fill(byte* buffer, size_t& sz)
         const wchar_t* temp_next;
         char* to_next;
         auto result = cvt.out(m_state, temp, temp_end, temp_next, reinterpret_cast<char*>(buffer), reinterpret_cast<char*>(buffer) + sz, to_next);
-        produced += to_next - reinterpret_cast<char*>(buffer);
-        buffer = reinterpret_cast<byte*>(to_next);
+        produced += to_next - buffer;
+        buffer = to_next;
 
         if (result == codecvt_base::noconv)
             assert(false);      // Unclear how to handle this. Does it mean that conversion is impossible or that we can just copy the buffers?
@@ -2802,7 +3032,7 @@ inline codecvt_base::result ustring::saver::fill(byte* buffer, size_t& sz)
 // Literal operators
 namespace literals::string_literals {
 
-    inline ustring operator""_u(const char* ptr, size_t sz) { return ustring::view(ptr, sz); }
+    inline ustring operator""_u(const char* ptr, size_t sz) { return ustring::view(ptr, sz, locale()); }        // Literals use C locale as a placeholder for "execution" charset.
     inline ustring operator""_u(const wchar_t* ptr, size_t sz) { return ustring::view(ptr, sz); }
     inline ustring operator""_u(const char8_t* ptr, size_t sz) { return ustring::view(ptr, sz); }
     inline ustring operator""_u(const char16_t* ptr, size_t sz) { return ustring::view(ptr, sz); }
@@ -2810,7 +3040,7 @@ namespace literals::string_literals {
 
 #ifdef IS_STANDRADIZED
 
-    inline ustring operator""u(const char* ptr, size_t sz) { return ustring::view(ptr, sz); }
+    inline ustring operator""u(const char* ptr, size_t sz) { return ustring::view(ptr, sz, locale()); }        // Literals use C locale as a placeholder for "execution" charset.
     inline ustring operator""u(const wchar_t* ptr, size_t sz) { return ustring::view(ptr, sz); }
     inline ustring operator""u(const char8_t* ptr, size_t sz) { return ustring::view(ptr, sz); }
     inline ustring operator""u(const char16_t* ptr, size_t sz) { return ustring::view(ptr, sz); }
