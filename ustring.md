@@ -1,16 +1,9 @@
 ustring, an immutable Unicode string
 ====================================
 
-`ustring` is a immutable string class presenting its contents as unicode code points (type `char32_t`). To open for internal
-representations like UTF-8 or UTF-16 which don't have a fixed number of bytes per code point its API does not allow random access or
-mutation, instead bidirectional iterators are used to access individual code points.
+`ustring` is a immutable string class presenting its contents as unicode code points (type `char32_t`). To open for internal representations like UTF-8 or UTF-16 which don't have a fixed number of bytes per code point its API does not allow random access or mutation, instead bidirectional iterators are used to access individual code points.
 
-Thanks to the immutability sharing with a reference counted implementation is possible. It is also possible to implement `ustring` such
-that substrings can be created by sharing the same implementation while referring to a subset of its contents. Furthermore the
-somewhat limited API allows concatenation of multiple ustring objects to be performed by referring to the implementation for the
-concatenated parts. In addition implementations are allowed to refer to literals and other data (that must outlive the ustring) object rather than
-copying the data to heap memory. The API also allows small object optimization and there is a trade off
-between time to copy those characters and the time to increment a reference count atomically to be made by implementers. Finally the API has been designed to allow reusing heap buffers if ustrings are created from rvalue basic_string objects.
+Thanks to the immutability sharing with a reference counted implementation is possible. It is also possible to implement `ustring` such that substrings can be created by sharing the same implementation while referring to a subset of its contents. Furthermore the somewhat limited API allows concatenation of multiple ustring objects to be performed by referring to the implementation for the concatenated parts. In addition implementations are allowed to just refer to literals and other data (that must outlive the ustring) object rather than copying the data to heap memory. The API also allows small object optimization and there is a trade off between time to copy those characters and the time to increment a reference count atomically to be made by implementers. Finally the API has been designed to allow reusing heap buffers if ustrings are created from *rvalue* `basic_string` objects.
 
 ## Synopsis
 
@@ -19,11 +12,12 @@ template<typename T> concept character;
 
 class ustring {
 public:
-    enum encoding_t : uint8_t { narrow, utf8, utf16, utf32, other };
+    enum encoding_t : uint8_t { utf8, utf16, utf32, wide, execution, system, single, multipart };
 
     class iterator;
     class loader;
     class saver;
+    class filler;
 
     template<character T> static constexpr encoding_t encoding_of;
     template<encoding_t> using encoding_type;
@@ -33,42 +27,63 @@ public:
     ustring(const ustring& src);
     ustring(ustring&& src);
 
-    ustring(size_t count, char32_t c);
+    template<character T> ustring(T c);
+    template<character T> ustring(size_t count, T c);
 
     template<character T> explicit ustring(const T* src);
     template<character T> ustring(const T* src, size_t);
 
-    template<character T> 
-    ustring(const basic_string<T>& src, size_t pos = 0, size_t count = npos);
-    template<character T> 
-    ustring(basic_string<T>&& src, size_t pos = 0, size_t count = npos);
-    template<character T> 
-    ustring(basic_string_view<T> src);
-    
-    ustring(const byte* src, locale& loc);
-    ustring(const byte* src, size_t count, locale& loc);
+    ustring(const char* src, locale& loc);
+    ustring(const char* src, size_t count, locale& loc);
     ustring(const string& src, locale& loc);
 
-    ~ustring();
+    template<character T, typename Tr = char_traits<T>, typename Al = allocator<T>> 
+    ustring(const basic_string<T, Tr, Al>& src, size_t pos = 0, size_t count = npos);
+    template<character T, typename Tr = char_traits<T>, typename Al = allocator<T>> 
+    ustring(basic_string<T, Tr, Al>&& src);
+    template<character T, typename Tr = char_traits<T>> 
+    ustring(basic_string_view<T, Tr> src, size_t pos = 0, size_t count = npos);
 
-    template<character T> static 
-    ustring view(const T*, std::size_t);                
-    template<character T> static 
-    ustring view(const basic_string<T>& original, size_t pos = 0, size_t count = npos);
-    template<character T> static 
-    ustring view(const basic_string_view<T>& original);
+    template<typename Tr = char_traits<char>, typename Al = allocator<char>> 
+    ustring(const basic_string<char, Tr, Al>& src, const locale& loc, size_t pos = 0, size_t count = npos);
+    template<typename Tr = char_traits<char>, typename Al = allocator<char>> 
+    ustring(basic_string<char, Tr, Al>&& src, const locale& loc);
+    template<typename Tr = char_traits<char>> 
+    ustring(basic_string_view<char, Tr> src, const locale& loc, size_t pos = 0, size_t count = npos);
+
+    ~ustring();
 
     ustring& operator=(const ustring& rhs);
     ustring& operator=(ustring&& rhs);
 
-    friend ustring operator+(ustring&& lhs, const ustring& rhs);
-    friend ustring operator+(const ustring& lhs, const ustring& rhs);
+    friend ustring operator+(ustring&& lhs, ustring&& rhs);
     ustring& operator+=(const ustring& rhs);
+    ustring& operator+=(ustring&& rhs);
 
     bool operator==(const ustring& rhs) const;
     strong_ordering operator<=>(const ustring& rhs) const;
 
+    template<character T> static ustring view(const T* src);
+    template<character T> static ustring view(const T*, std::size_t);                
+
+    template<character T, typename Tr = char_traits<T>, typename Al = allocator<T>> 
+    static ustring view(const basic_string<T, Tr, Al>& original, size_t pos = 0, size_t count = npos);
+    template<character T, typename Tr = char_traits<T>>
+    static ustring view(const basic_string_view<T, Tr>& original);
+ 
+    static ustring view(const char*, size_t sz, const locale& loc);
+    static ustring view(const char* src, const locale& loc);
+
+    template<typename Tr = char_traits<char>, typename Al = allocator<char>>
+    static ustring view(const basic_string<char, Tr, Al>& original, 
+                        const locale& loc, size_t pos = 0, size_t count = npos);
+    template<typename Tr = char_traits<char>>
+    static ustring view(const basic_string_view<char, Tr>& original, const locale& loc);
+
     bool empty() const;
+
+    iterator begin() const;
+    iterator end() const;
 
     pair<iterator, iterator> find_ends(const ustring& pattern) const;
     iterator find(const ustring& pattern) const;
@@ -84,8 +99,7 @@ public:
     ustring first(const iterator& upto) const;
     ustring last(const iterator& from) const;
     
-    template<character T> 
-    std::basic_string<T> basic_string(T bad_char = '?') const;
+    template<character T> std::basic_string<T> basic_string(T bad_char = '?') const;
     std::string string(char bad_char = '?') const;
     std::wstring wstring() const;
     std::u8string u8string() const;
@@ -98,29 +112,30 @@ public:
     const byte* data() const;
     size_t bytes() const;
 
-    template<character T> 
-    size_t estimated_size() const; 
-    template<character T> 
-    size_t copy(T* dest, size_t count, T bad_char = '?') const;
-    template<character T, 
-    size_t SZ> span<T> copy(span<T, SZ> dest, T bad_char = '?') const;
+    template<character T> size_t estimated_size() const; 
+    template<character T> size_t copy(T* dest, size_t count, T bad_char = '?') const;
+    template<character T, size_t SZ> span<T> copy(span<T, SZ> dest, T bad_char = '?') const;
 };
 ```
 
 ## Character types
 
-The new concept `character` is a general concept that is true for the five types `char`, `char8_t`, `char16_t`, `char32_t` and `wchar_t`, i.e. the types that `ustring` handles. This concept is probably useful for other purposes, and there should probably be a `is_character` / `is_character_v` trait to complement it. Note that `unsigned char` and `signed char` are not `character` as they are used for arithmetic rather than text, with `int8_t` and `uint8_t` as type aliases.
+The new *concept* `character` is a general concept that is true for the five types `char`, `char8_t`, `char16_t`, `char32_t` and `wchar_t`, i.e. the types that `ustring` handles. This concept is probably useful for other purposes, and there should probably be a
+`is_character` / `is_character_v` trait to complement it. Note that `unsigned char` and `signed char` are not `character` as they
+are used for arithmetic rather than text, sometimes with `int8_t` and `uint8_t` as type aliases.
 
-As `ustring` has a need for testing for character encoding at runtime it contains an enum `ustring::encoding_t` which indicates the different encodings, basically corresponding to the different character types. The enumerators are named after the encodings UTF-8. UTF-16, UTF-32 and narrow encodings. There is not special enumerator for wchar_t which instead is denoted by UTF-16 or UTF-32 depending on the system's definition (UTF-16 on Windows and UTF-32 on Linux and similar). In addition there is a separate enumerator for strings which are don't have an internal storage of contiguous code units in any of the encodings.
+For users to be able to optimize retrieving data from `ustring` when it is stored in the desired encoding there is a need for testing for character encoding at runtime. The enum `ustring::encoding_t` indicates the different encodings, basically corresponding to the different character types. The enumerators are named after the encodings UTF-8. UTF-16, UTF-32, wchar_t and narrow encodings. While wchar_t encoding will usually be the same as UTF-16 or UTF-32 depending on platform keeping a separate enumerator value simplifies some types of code which works with wstring and similar. For narrow encodings there are three distinct values, `execution`, `system` and `single` which indicate that char values represent the execution encoding (for char literals), the system encoding (default OS narrow encoding assumed when non-literal char data is provided to an ustring without any locale) and single, which is used when some other locale was provided with char data. Note that the user must keep track of which locale this may be in this case. [This possibility is debatable, maybe it is better to mandate conversion to one of the other encodings in this case]. In addition there is a separate enumerator `multipart` for strings which are don't have an internal storage of contiguous code units in any of the encodings.
 
-To aid user code with encoding handling there is a variable template `ustring::encoding_of` which contains the `encoding_t` for each character type. The enumerator for wchar_t depends on the platform.
+To aid user code with encoding handling there is a variable template `ustring::encoding_of` which contains the `encoding_t` for each character type. This template is not defined for char.
 
-For the opposite relation there is a type alias template `ustring::encoding_type` which evaluates to the character type corresponding to each `encoding_t` enumerator. The `other` enumerator does not correspond to a character type and it is unclear whether trying to use is should be a compile time error, or yield std::byte or possibly void. As proposed it is not defined. Note that wchar_t is not the type corresponding to any of the enumerator values.
+For the opposite relation there is a type alias template `ustring::encoding_type` which evaluates to the character type
+corresponding to each `encoding_t` enumerator. The `multipart` enumerator does not correspond to a character type and it is unclear whether trying to use is should be a compile time error, or yield std::byte or possibly void. As proposed it is not defined. 
 
 Construction
 ------------
 
-ustring has a lot of constructors to make it easy to use as a vocabulary type. Many constructors parallel those of `basic_string` but are templated on the character type. The implementation is free to either retain the encoding of the source data or to convert the data to a common internal encoding, which is feasible as the data has to be copied anyway.
+ustring has a lot of constructors to make it easy to use as a vocabulary type. Many constructors parallel those of `basic_string`
+but are templated on the character type. The implementation is free to either retain the encoding of the source data or to convert the data to a common internal encoding, which is reasonable as the data has to be copied anyway.
 
 ```C++
     ustring()    
@@ -130,32 +145,32 @@ ustring has a lot of constructors to make it easy to use as a vocabulary type. M
 
     template<character T> ustring(size_t count, char32_t c);
 
-    template<character T> ustring(const T* src);
+    template<character T> explicit ustring(const T* src);
     template<character T> ustring(const T* src, size_t);
 
     template<character T> 
     ustring(const basic_string<T>& src, size_t pos = 0, size_t count = npos);
     template<character T> 
-    ustring(basic_string<T>&& src, size_t pos = 0, size_t count = npos);
+    ustring(basic_string<T>&& src);
     template<character T> 
     ustring(basic_string_view<T> src);
 ```
 
-### Character string constructors
+### Character sequence constructors
 
-The constructors from just a character pointer are explicit to encourage the use of the `""u` literals, see below. The advantage of using the `""u` literals is that the literal characters don't need to be copied, so that's a large win. The explicit declaration prevents using a regular literal as the argument for a using function parameter, which should catch most accidental use. A stronger measure would be to replace the non-literal const T* constructor by a pseudo-constructor called something like `create` or `from_buffer`.
+The constructors from just a character pointer are explicit to encourage the use of the `""u` literals, see below. The advantage of using the `""u` literals is that the literal characters don't need to be copied, so that's a large win. The explicit declaration prevents using a regular literal as the argument for a ustring function parameter, which should catch most accidental use. A stronger measure would be to replace the non-literal const T* constructor by a pseudo-constructor called something like `create` or `from_buffer`.
 
-Preventing direct construction of `ustring` from a character buffer or character pointer has the advantage that functions like `stoi` can be overloaded for ustring without breaking old code, that is, nothing from which you can implicitly construct a `std::basic_string` should be possible to construct a ustring from implicitly.
+Preventing direct construction of `ustring` from a character buffer or character pointer has the advantage that functions like `stoi` can be overloaded for ustring without breaking old code, that is, nothing which you can construct a `std::basic_string` from implicitly should be possible to construct a ustring from implicitly.
+
+In addition there are constructors which also take an explicit count, saving on the strlen operation in some cases. Iterator pair constructors could be added, but would require that value_type or maybe decltype(*iter) be one of the character types to be able to determine the encoding of the source sequence.
 
 ### Character constructor
 
-The constructor from a count and a character takes a Unicode code point as no other character type can't represent all code points in one character. Maybe deleted constructors from at least `char8_t` and `char16_t` should be added to clarify that a code point can't be represented in those data types.
+There is a templated constructor for one character or a repeated character. The char specialization of these constructors assume that the suitable encoding is execution. There is no single character constructor taking a char and a locale, although this could be added to improve orthogonality.
 
 ### basic_string and basic_string_view constructors.
 
-`ustring` objects can be constructed from all five standard character pointer types, with or without size.
-
-The constructors from `basic_string` copy the string contents. These have optional pos and size parameters, as well as optional Traits and Alloc template parameters, which is in line with how std::filesystem::path is constructed.
+The constructor from `basic_string<T>` copies the string contents. It has optional pos and size parameters, as well as optional Traits and Alloc template parameters, which is in line with how std::filesystem::path is constructed.
 
 #### Rant about creating string_views for parts of strings.
 
@@ -198,21 +213,17 @@ Only Clang warns for this, both gcc and msvc are happy to get you in trouble: ht
 
 The constructor from rvalue `basic_string` could in some implementations reuse the data block of the `basic_string` and even give it back later if the rvalue version of the corresponding `ustring::string()` function is called. This is relatively easy to implement if only the default Traits and Alloc types are supported (a union or variant can be used) while to support any Traits and Alloc type a full type erase of the ustring implementation must be done, for instance using an abstract base class to implementation subclasses. The implementation is free to implement or not implement any of these levels of complexity for any or all character types. Note that while a full virtualization of the implementation API may seem daunting the fact is that those virtual methods only need to be called when a new iterator is created, or in some cases only when the Impl object is destroyed.
 
-It is possible for some implementations to set up the ustring object correctly even if pos and size denotes part of the original string, although this means that the entire memory block will be retained even if the pos/size combination only denotes a small part.
-
-### basic_string_view constructors
-
-The constructor from `basic_string_view` does not have pos and size as it is so easy to call `substr()` on the string view to handle this, and as efficient. As a string view does not own the data it does not make sense to have a rvalue version of this constructor. But maybe it should have the pos and size parameters anyway to make the API more orthogonal.
+It could be possible for some implementations to set up the ustring object correctly even if pos and size denotes part of the original string, although this means that the entire memory block will be retained even if the pos/size combination only denotes a small part. Currently it is not considered interesting enough to add pos and size parameters for the rvalue overload and any call site that provides them would fall back to the lvalue overload. Maybe it could be unspecified whether the rvalue overload has pos and size parameters.
 
 ### Converting constructors
 
 ```C++
-    ustring(const byte* src, locale& loc);
-    ustring(const byte* src, size_t count, locale& loc);
-    ustring(const string& src, locale& loc);
+    ustring(const char* src, locale& loc);
+    ustring(const char* src, size_t count, locale& loc);
+    ustring(const string& src, locale& loc, size_t pos = 0, size_t count = npos);
 ```
 
-Constructors from `const byte*` have a `locale` parameter. The `byte` type is used to represent data of any locale so the locale at hand must be specified. These constructors must perform a conversion if the locale is not for the same encoding as any of the ones implicitly selected by one of the character types. If the implementation so chooses it can also implement a table lookup representation for the case of character sets like ISO/IEC 8859-1 (latin-1) which contain up to 256 Unicode code points. It would also be possible to implement 16 bit table lookup for encodings like UCS2, but as this is a subset of UTF-16 this seems unnecessary. Possibly there are other 16 bit encodings which can be handled by a table lookup.
+A constructor from `const char*` with a `locale` parameter is available. These constructors would probably perform a conversion if the locale is not for the same encoding as any of the ones implicitly selected by one of the character types, which basically pertains to UTF-8 and ASCII. If the implementation so chooses it can also implement a table lookup representation for the case of character sets like ISO/IEC 8859-1 (latin-1) which contain up to 256 Unicode code points. It would also be possible to implement 16 bit table lookup for encodings like UCS2, but as this is a subset of UTF-16 this seems unnecessary. Possibly there are other 9-16 bit encodings which can be handled by a table lookup. 
 
 As there are encodings which are not reversible (such as shift-jis) it is impossible to retain the bidirectionality of iterators if an implementation would opt to convert such encodings on the fly.  There are also other drawbacks with such an implementation:
 
@@ -226,7 +237,7 @@ Note: The constructor taking a `std::string` and a `locale` is a special case, w
 
 ### What is the default encoding of a char string anyway?
 
-To keep in synch with std::filesystem::path a char string must be interpreted as being in the current locale. I'm not sure if this means that it _always_ is in the locale of the underlying operating system (ensuring that filenames "work" when sent to 8 bit APIs) or if it follows the std::locale::global() setting. The Microsoft documentation at [](https://docs.microsoft.com/en-us/cpp/standard-library/path-class?view=msvc-170) suggests the former interpretation, and on Linux there is no difference, it is always UTF-8.
+To keep in sync with std::filesystem::path a char string must be interpreted as being in the current locale. I'm not sure if this means that it _always_ is in the locale of the underlying operating system (ensuring that filenames "work" when sent to 8 bit APIs) or if it follows the std::locale::global() setting. The Microsoft documentation at [](https://docs.microsoft.com/en-us/cpp/standard-library/path-class?view=msvc-170) suggests the former interpretation, and on Linux there is no difference, it is always UTF-8.
 
 As the operating system interpretation of a char string can be any locale this means that constructors from char strings may have to set up a look up table to get the code points from the characters, or if the local encoding of the machine is not one char per code point even convert the incoming string on the fly.
 
@@ -252,13 +263,13 @@ Note: These operators must be written separately, as a templated literal operato
 
 ### The view pseudo-constructor
 
-The static member function view can be used to create viewing ustrings from non-literals. In this case the programmer guarantees that the data is
-available throughout the lifetime of the `ustring`, and furthermore that it will not change. If such data changes this is an UB
-condition as iterators that access ustring data are allowed to cache parts of the string for efficiency reasons.
+The static member function view can be used to create viewing ustrings from non-literals. In this case the programmer guarantees that the data is available throughout the lifetime of the `ustring`, and furthermore that it will not change. If such data changes this is an UB condition as ustring is allowed to copy the data depending on its implementation. Iterators that access ustring data are also allowed to cache parts of the string for efficiency reasons even if it was not initially copied.
 
 ```C++
     template<character T> static ustring 
-    view(const T*, std::size_t);                
+    view(const T*, std::size_t);
+	template<character T> static ustring 
+    view(const T*); 
     template<character T> static ustring 
     view(const basic_string<T>& original, size_t pos = 0, size_t count = npos);
     template<character T> static ustring 
@@ -266,6 +277,12 @@ condition as iterators that access ustring data are allowed to cache parts of th
 ```
 
 Again it is unclear if it would be better to have pos/size for `basic_string_view` too for a more orthogonal API.
+
+For char data type there are view overloads taking a locale. This allows non-copying views to be created if the encoding of the locale allows this.
+
+### ustring::filler
+
+The ustring::filler class is an output iterator which creates a ustring from Unicode code points. When the sequence is complete it can be retrieved as a ustring using the rvalue-qualified cast operator or, equivalently, using the str() method, which is available in both lvalue and rvalue overloads. The lvalue overload sets the filler up for creating a new ustring. [Would it be possible to allow continuing to use the filler after calling str(), ensuring that the first retrieved string is a proper prefix of what ends up being the complete string. It is a bit unclear if it can be done efficiently for all feasible implementations].
 
 ### ustring::loader
 

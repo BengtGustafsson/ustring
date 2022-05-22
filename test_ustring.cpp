@@ -48,7 +48,7 @@ void test_ustring()
 
     std::cout.imbue(std::locale(".850"));
     std::cout << std::cout.getloc().name();
-    std::cout << "\nÅÄÖ\nåäö" << std::endl;
+    std::cout << "\nÅÄÖ\nåäö"_u << std::endl;
     STD::ustring u = "ÅÄÖ"_u;
     std::cout << u << std::endl;
     STD::ustring lower = tolower(u);
