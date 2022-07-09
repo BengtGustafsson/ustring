@@ -28,8 +28,12 @@ Further information at: https://opensource.org/licenses/MIT.
 
 #include <iostream>
 
+extern void foo();
+
 void test_ustring()
 {
+    foo();
+
     using namespace STD::literals::string_literals;
 
     STD::ustring a;

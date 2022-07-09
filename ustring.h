@@ -589,7 +589,7 @@ namespace literals::string_literals {
 }
 
 
-ostream& operator<<(ostream& os, const ustring& src)
+inline ostream& operator<<(ostream& os, const ustring& src)
 {
     ustring::saver s(os.getloc(), src);
 
@@ -855,7 +855,7 @@ namespace detail {
 
     template<character E> using default_representation_t = detail::default_representation<E>::type;
 
-    class TableManager {
+    inline class TableManager {
     public:
         char32_t* get(const locale& loc) {
             auto i = m_tables.find(loc.name());
@@ -895,7 +895,7 @@ namespace detail {
         map<string, unique_ptr<char32_t[]>> m_tables;
     } table_manager;
 
-    ustring::encoding_t encoding_of_locale(const locale& loc)
+    inline ustring::encoding_t encoding_of_locale(const locale& loc)
     {
         if (loc == locale())
             return ustring::execution;
@@ -983,7 +983,7 @@ template<character T> ustring::ustring(size_t count, T c)
     T* ptr = reinterpret_cast<T*>(setup(count * sizeof(T), encoding_of<T>));
     fill(ptr, ptr + count, c);
 }
-template<> ustring::ustring(size_t count, char c) {
+template<> inline ustring::ustring(size_t count, char c) {
     // char overload is specialized as encoding_of<> is not defined for char.
     char* ptr = reinterpret_cast<char*>(setup(count, execution));
     fill(ptr, ptr + count, c);
@@ -996,7 +996,7 @@ template<character T> ustring::ustring(const T* src, size_t sz)
 }
 template<> inline ustring::ustring(const char* src, size_t sz) : ustring(src, sz, locale("")) {}
 
-template<character T> inline ustring::ustring(const T* src) : ustring(src, len_helper(src)) {}						// Interpreted as execution CS
+template<character T> ustring::ustring(const T* src) : ustring(src, len_helper(src)) {}						// Interpreted as execution CS
 
 inline ustring::ustring(const char* src, size_t sz, const locale& loc)
 {
@@ -1472,7 +1472,7 @@ namespace detail {
     }
 }
 
-ustring::encoding_t ustring::mode::normalized_encoding() const
+inline ustring::encoding_t ustring::mode::normalized_encoding() const
 {
     switch (m_encoding) {
     case ustring::wide:
@@ -3115,7 +3115,7 @@ inline ustring trim(const ustring& src)	// Trim both ends.
     return src.substr(i, e);
 }
 
-ustring tolower(const ustring& src, const locale& loc)
+inline ustring tolower(const ustring& src, const locale& loc)
 {
     auto& ct = use_facet<ctype<char32_t>>(loc);
 
@@ -3126,7 +3126,7 @@ ustring tolower(const ustring& src, const locale& loc)
     return move(f);
 }
 
-ustring toupper(const ustring& src, const locale& loc)
+inline ustring toupper(const ustring& src, const locale& loc)
 {
     auto& ct = use_facet<ctype<char32_t>>(loc);
 
@@ -3137,7 +3137,7 @@ ustring toupper(const ustring& src, const locale& loc)
     return move(f);
 }
         
-ustring capitalize(const ustring& src, const locale& loc)
+inline ustring capitalize(const ustring& src, const locale& loc)
 {
     auto& ct = use_facet<ctype<char32_t>>(loc);
 
@@ -3154,22 +3154,25 @@ ustring capitalize(const ustring& src, const locale& loc)
 }
 
 
-ustring insert(const ustring& source, ustring::iterator start, const ustring& addition)
+inline ustring insert(const ustring& source, ustring::iterator start, const ustring& addition)
 {
     return replace(source, start, start, addition);
 }
 
-ustring replace(const ustring& source, ustring::iterator start, ustring::iterator end, const ustring& replacement)
+
+inline ustring replace(const ustring& source, ustring::iterator start, ustring::iterator end, const ustring& replacement)
 {
     return source.first(start) + replacement + source.last(end);
 }
 
-ustring replace(const ustring& source, pair<ustring::iterator, ustring::iterator> where, const ustring& replacement)
+
+inline ustring replace(const ustring& source, pair<ustring::iterator, ustring::iterator> where, const ustring& replacement)
 {
     return replace(source, where.first, where.second, replacement);
 }
 
-ustring replace(const ustring& source, const ustring& pattern, const ustring& replacement, size_t max_count)
+
+inline ustring replace(const ustring& source, const ustring& pattern, const ustring& replacement, size_t max_count)
 {
     ustring ret;
     auto prev = source.begin();
@@ -3184,12 +3187,12 @@ ustring replace(const ustring& source, const ustring& pattern, const ustring& re
     return ret + source.last(prev);
 }
 
-ustring erase(const ustring& source, ustring::iterator start, ustring::iterator end)
+inline ustring erase(const ustring& source, ustring::iterator start, ustring::iterator end)
 {
     return source.first(start) + source.last(end);
 }
 
-ustring erase(const ustring& source, const pair<ustring::iterator, ustring::iterator>& ends)
+inline ustring erase(const ustring& source, const pair<ustring::iterator, ustring::iterator>& ends)
 {
     return erase(source, ends.first, ends.second);
 }
